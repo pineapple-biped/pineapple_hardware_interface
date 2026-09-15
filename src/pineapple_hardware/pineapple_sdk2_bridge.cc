@@ -1,5 +1,7 @@
 #include "pineapple_sdk2_bridge.h"
 
+#include <algorithm>
+
 PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs)
 {
 
@@ -48,9 +50,25 @@ PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_con
     low_state_go_puber_.reset(new ChannelPublisher<unitree_go::msg::dds_::LowState_>(TOPIC_LOWSTATE));
     low_state_go_puber_->InitChannel();
     
+    // The MTi is a robot-level device, not a per-platform one: any config that
+    // declares it turns it on, so argument order cannot change whether
+    // orientation gets published.
+    have_imu_ = std::any_of(platform_configs.begin(), platform_configs.end(),
+                            [](const MotorConfig &cfg) { return cfg.have_imu; });
     if (have_imu_) {
-        InitXsensIMU();
-        xsens_imu_thread = std::thread(&PineappleSdk2Bridge::ProcessXsensData, this);
+
+        have_imu_ = InitXsensIMU();
+        if (have_imu_) {
+            xsens_imu_thread = std::thread(&PineappleSdk2Bridge::ProcessXsensData, this);
+        } else {
+            std::cerr << "IMU requested in config but could not be started; "
+                      << "orientation will not be published." << std::endl;
+        }
+    }
+    if (!have_imu_) {
+        // Publish a valid identity rather than the IDL's default {0,0,0,0},
+        // which NaNs any consumer that normalizes the quaternion.
+        low_state_go_.imu_state().quaternion()[0] = 1.0f;
     }
 
     init_time_ = std::chrono::steady_clock::now();
@@ -75,8 +93,9 @@ PineappleSdk2Bridge::~PineappleSdk2Bridge()
 
     if (have_imu_) {
         xsens_imu_thread.join();
-        CloseXsensIMU();
     }
+
+    CloseXsensIMU();
 
 }
 
@@ -174,24 +193,23 @@ void PineappleSdk2Bridge::PublishLowStateGo()
     
     if (have_imu_)
     {
-        low_state_go_.imu_state().quaternion()[0] = xsens_imu_data->quaternion[0];
-        low_state_go_.imu_state().quaternion()[1] = xsens_imu_data->quaternion[1];
-        low_state_go_.imu_state().quaternion()[2] = xsens_imu_data->quaternion[2];
-        low_state_go_.imu_state().quaternion()[3] = xsens_imu_data->quaternion[3];
+        // One snapshot, so quaternion components can never be mixed across
+        // two different device samples.
+        const ImuSample imu = xsens_imu_data->load();
 
-        low_state_go_.imu_state().gyroscope()[0] = xsens_imu_data->gyro[0];
-        low_state_go_.imu_state().gyroscope()[1] = xsens_imu_data->gyro[1];
-        low_state_go_.imu_state().gyroscope()[2] = xsens_imu_data->gyro[2];
-
-        low_state_go_.imu_state().accelerometer()[0] = xsens_imu_data->accel[0];
-        low_state_go_.imu_state().accelerometer()[1] = xsens_imu_data->accel[1];
-        low_state_go_.imu_state().accelerometer()[2] = xsens_imu_data->accel[2];
+        for (int i = 0; i < 4; i++) {
+            low_state_go_.imu_state().quaternion()[i] = imu.quaternion[i];
+        }
+        for (int i = 0; i < 3; i++) {
+            low_state_go_.imu_state().gyroscope()[i] = imu.gyro[i];
+            low_state_go_.imu_state().accelerometer()[i] = imu.accel[i];
+        }
     }
     low_state_go_puber_->Write(low_state_go_);
 
 }
 
-void PineappleSdk2Bridge::InitXsensIMU()
+bool PineappleSdk2Bridge::InitXsensIMU()
 {
     xsens_control = XsControl::construct();
     XsPortInfoArray xsens_portInfoArray = XsScanner::scanPorts();
@@ -205,11 +223,11 @@ void PineappleSdk2Bridge::InitXsensIMU()
     }
     if (xsens_mtPort.empty()) {
         std::cerr << "No MTi device found. IMU thread exiting." << std::endl;
-        return;
+        return false;
     }
     if (!xsens_control->openPort(xsens_mtPort.portName().toStdString(), xsens_mtPort.baudrate())) {
         std::cerr << "Could not open IMU port. IMU thread exiting." << std::endl;
-        return;
+        return false;
     }
     // Get the device object
     cout << "Found a device with ID: " << xsens_mtPort.deviceId().toString().toStdString() << " @ port: " << xsens_mtPort.portName().toStdString() << ", baudrate: " << xsens_mtPort.baudrate() << endl;
@@ -219,52 +237,90 @@ void PineappleSdk2Bridge::InitXsensIMU()
 	cout << "Device: " << xsens_device->productCode().toStdString() << ", with ID: " << xsens_device->deviceId().toString() << " opened." << endl;
 
     xsens_device->addCallbackHandler(&xsens_callback);
-    if (!xsens_device->gotoConfig()) return;
+    if (!xsens_device->gotoConfig()) {
+        std::cerr << "IMU refused to enter config mode." << std::endl;
+        return false;
+    }
     xsens_device->readEmtsAndDeviceConfiguration();
     XsOutputConfigurationArray configArray;
     configArray.push_back(XsOutputConfiguration(XDI_PacketCounter, 0));
 	configArray.push_back(XsOutputConfiguration(XDI_SampleTimeFine, 0));
     if (xsens_device->deviceId().isVru() || xsens_device->deviceId().isAhrs())
 	{
-		configArray.push_back(XsOutputConfiguration(XDI_Quaternion, 100));
-        configArray.push_back(XsOutputConfiguration(XDI_RateOfTurnHR, 1000));
-        configArray.push_back(XsOutputConfiguration(XDI_AccelerationHR, 1000));
+
+		configArray.push_back(XsOutputConfiguration(XDI_Quaternion, kImuOutputRateHz));
+        configArray.push_back(XsOutputConfiguration(XDI_RateOfTurnHR, kImuOutputRateHz));
+        configArray.push_back(XsOutputConfiguration(XDI_AccelerationHR, kImuOutputRateHz));
 	}
-    if (!xsens_device->setOutputConfiguration(configArray)) return;
-    if (!xsens_device->gotoMeasurement()) return;
+    if (!xsens_device->setOutputConfiguration(configArray)) {
+        std::cerr << "IMU rejected the output configuration." << std::endl;
+        return false;
+    }
+    if (!xsens_device->gotoMeasurement()) {
+        std::cerr << "IMU refused to enter measurement mode." << std::endl;
+        return false;
+    }
+    return true;
 }
 
 void PineappleSdk2Bridge::ProcessXsensData()
 {
-    
+    // Carried across packets so a field missing from one packet keeps its last
+    // value instead of reverting.
+    ImuSample sample = xsens_imu_data->load();
+
+    uint16_t prev_counter = 0;
+    bool have_prev_counter = false;
+    uint64_t received = 0, dropped = 0, orientation_updates = 0;
+    auto last_report = std::chrono::steady_clock::now();
+
     while (is_running) {
-        if (xsens_callback.packetAvailable()) {         
+
+        while (xsens_callback.packetAvailable()) {
             XsDataPacket packet = xsens_callback.getNextPacket();
+            ++received;
+
+            // XDI_PacketCounter is already requested in InitXsensIMU(); read it
+            // so loss is measured here rather than inferred from offline logs.
+            if (packet.containsPacketCounter()) {
+                const uint16_t counter = packet.packetCounter();
+                if (have_prev_counter) {
+
+                    const uint16_t gap = static_cast<uint16_t>(counter - prev_counter);
+                    if (gap > 1) dropped += gap - 1;
+                }
+                prev_counter = counter;
+                have_prev_counter = true;
+            }
 
             if (packet.containsOrientation()) {
                 XsQuaternion q = packet.orientationQuaternion();
-                xsens_imu_data->quaternion[0] = q.w();
-                xsens_imu_data->quaternion[1] = q.x();
-                xsens_imu_data->quaternion[2] = q.y();
-                xsens_imu_data->quaternion[3] = q.z();
+                sample.quaternion[0] = q.w();
+                sample.quaternion[1] = q.x();
+                sample.quaternion[2] = q.y();
+                sample.quaternion[3] = q.z();
                 XsEuler euler = packet.orientationEuler();
-                xsens_imu_data->rpy[0] = euler.roll();
-                xsens_imu_data->rpy[1] = euler.pitch();
-                xsens_imu_data->rpy[2] = euler.yaw();
+                sample.rpy[0] = euler.roll();
+                sample.rpy[1] = euler.pitch();
+                sample.rpy[2] = euler.yaw();
             }
             if (packet.containsRateOfTurnHR()) {
                 XsVector gyr_hr = packet.rateOfTurnHR();
                 for (int i = 0; i < 3; ++i) {
-                    xsens_imu_data->gyro[i] = gyr_hr[i];
+                    sample.gyro[i] = gyr_hr[i];
                 }
             }
             if (packet.containsAccelerationHR()) {
                 XsVector acc_hr = packet.accelerationHR();
                 for (int i = 0; i < 3; ++i) {
-                    xsens_imu_data->accel[i] = acc_hr[i];
+                    sample.accel[i] = acc_hr[i];
                 }
             }
+
+            xsens_imu_data->store(sample);
         }
+
+
         XsTime::msleep(1);
     }
 }

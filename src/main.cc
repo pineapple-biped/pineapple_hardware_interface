@@ -68,6 +68,9 @@ static bool LoadMotorConfig(const std::string &config_path, MotorConfig &motor_c
     }
 
     motor_config.set_zero = yaml_node["set_zero"].as<bool>();
+    // Optional: older configs predate the field, and a robot without the MTi
+    // fitted should still come up.
+    motor_config.have_imu = yaml_node["have_imu"] ? yaml_node["have_imu"].as<bool>() : false;
     motor_config.can_id_list = yaml_node["can_id"].as<std::vector<uint16_t>>();
     motor_config.mst_id_list = yaml_node["mst_id"].as<std::vector<uint16_t>>();
     for (const auto &type_node : yaml_node["motor_type"])

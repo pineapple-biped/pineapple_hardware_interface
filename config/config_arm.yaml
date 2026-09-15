@@ -5,6 +5,8 @@ interface: "lo" # Interface
 dev_sn: ""  # USB2CANFD serial number; run ./scan_canfd_sn to list connected devices
 set_zero: false 
 
+have_imu: false  # the MTi is on the robot body, not the arm
+
 # Order: arm_base upper_arm fore_arm 5dof end_effector
 can_id: [0x01, 0x02, 0x03, 0x04, 0x05, 0x06]
 mst_id: [0x11, 0x12, 0x13, 0x14, 0x15, 0x16]

@@ -5,6 +5,8 @@ interface: "lo" # Interface
 dev_sn: ""  # USB2CANFD serial number; run ./scan_canfd_sn to list connected devices
 set_zero: false # Zero the motors on startup
 
+have_imu: true
+
 # Order: L_hip L_thigh L_calf L_wheel R_hip R_thigh R_calf R_wheel
 can_id: [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
 mst_id: [0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18]
