@@ -9,7 +9,7 @@ DDS hardware interface for CSL wheel-biped robot
 ## Requirement
 - USB2CANFD firmware version (app v1.0.0.1)
 - Damiao motor firmware version (v3 or v4)
-- Mti-320 (IMU) baudrate: 115200 (must enable quatenion output at MT Manger software)
+- MTi-320: verify the detected baud rate with `imu_probe` (tested V3: 2000000 baud). The interface configures quaternion, gyro and acceleration at 100 Hz.
 
 ## Build
 1. Follow this repo to install [unitree_sdk2](https://github.com/unitreerobotics/unitree_sdk2).
@@ -38,6 +38,42 @@ DDS hardware interface for CSL wheel-biped robot
     cmake ..
     make
     ```
+## IMU USB latency (FTDI adapters)
+
+A 100 Hz sensor can still arrive in delayed bursts. On V3, changing the FTDI
+latency timer from 16 to 1 ms reduced the maximum observed callback gap from
+50.7 to 10.5 ms. This verifies delivery timing, not total sensor/filter latency.
+
+Stop the hardware interface, substitute the IMU's actual port if different, then:
+
+```sh
+echo 1 | sudo tee /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
+cat /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
+sudo ./build/imu_probe --measure
+```
+
+Expect readback `1`, approximately `100/100/100` Hz and `PASS`. The probe does
+not initialize motors. This setting may reset after reconnecting or rebooting.
+
+For persistence, identify the IMU adapter (**this command only reads IDs**):
+
+```sh
+udevadm info --attribute-walk --name=/dev/ttyUSB0 | grep -E 'idVendor|idProduct|serial'
+```
+
+Create `/etc/udev/rules.d/99-pineapple-imu-latency.rules` with the following line,
+replacing `VID`, `PID` and `SERIAL` with the IMU USB device's values from the same
+parent block. Do not use the USB hub's IDs or apply this to every FTDI adapter.
+
+```udev
+ACTION=="add", SUBSYSTEM=="usb-serial", ATTRS{idVendor}=="VID", ATTRS{idProduct}=="PID", ATTRS{serial}=="SERIAL", ATTR{latency_timer}="1"
+```
+
+Run `sudo udevadm control --reload-rules`, reconnect the IMU with the interface
+stopped, and repeat the timer readback and probe. If no unique serial is present,
+use a device-specific rule rather than omitting the selector blindly.
+See [IMU delivery diagnostics](docs/IMU_DELIVERY.md) if the probe fails.
+
 ## Useage
 
 Each config file describes one platform on its own USB2CANFD device. All motor
