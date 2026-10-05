@@ -11,6 +11,7 @@
 #include <unitree/idl/go2/LowCmd_.hpp>
 #include "../canfd/include/damiao.h"
 #include "../imu/xsens_imu.hpp"
+#include "../imu/configure_xsens.hpp"
 
 using namespace unitree::common;
 using namespace unitree::robot;
@@ -113,7 +114,6 @@ public:
     std::thread xsens_imu_thread;
     std::shared_ptr<ImuSharedData> xsens_imu_data;
 
-    static constexpr int kImuOutputRateHz = 100;
     XsControl* xsens_control = nullptr;
     XsPortInfo xsens_mtPort;
     CallbackHandler xsens_callback;

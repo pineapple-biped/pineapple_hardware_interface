@@ -84,3 +84,13 @@ add_executable(example_mti_receive_data
     src/test/example_mti_receive_data.cpp
 )
 target_link_libraries(example_mti_receive_data ${XSENS_OBJ_LIBS})
+# IMU-only diagnostic: no motor initialization or DDS traffic.
+add_executable(imu_probe src/test/imu_probe.cpp)
+target_link_libraries(imu_probe ${XSENS_OBJ_LIBS} pthread)
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(test_imu_delivery src/test/test_imu_delivery.cpp)
+    target_link_libraries(test_imu_delivery ${XSENS_OBJ_LIBS} pthread)
+    target_compile_options(test_imu_delivery PRIVATE -UNDEBUG)
+    add_test(NAME imu_delivery COMMAND test_imu_delivery)
+endif()

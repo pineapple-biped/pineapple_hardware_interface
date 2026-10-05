@@ -1,6 +1,7 @@
 #include "pineapple_sdk2_bridge.h"
 
 #include <algorithm>
+#include "../imu/configure_xsens.hpp"
 
 PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs)
 {
@@ -236,28 +237,10 @@ bool PineappleSdk2Bridge::InitXsensIMU()
 
 	cout << "Device: " << xsens_device->productCode().toStdString() << ", with ID: " << xsens_device->deviceId().toString() << " opened." << endl;
 
+    xsens_callback.setTarget(xsens_imu_data);
     xsens_device->addCallbackHandler(&xsens_callback);
-    if (!xsens_device->gotoConfig()) {
-        std::cerr << "IMU refused to enter config mode." << std::endl;
-        return false;
-    }
-    xsens_device->readEmtsAndDeviceConfiguration();
-    XsOutputConfigurationArray configArray;
-    configArray.push_back(XsOutputConfiguration(XDI_PacketCounter, 0));
-	configArray.push_back(XsOutputConfiguration(XDI_SampleTimeFine, 0));
-    if (xsens_device->deviceId().isVru() || xsens_device->deviceId().isAhrs())
-	{
-
-		configArray.push_back(XsOutputConfiguration(XDI_Quaternion, kImuOutputRateHz));
-        configArray.push_back(XsOutputConfiguration(XDI_RateOfTurnHR, kImuOutputRateHz));
-        configArray.push_back(XsOutputConfiguration(XDI_AccelerationHR, kImuOutputRateHz));
-	}
-    if (!xsens_device->setOutputConfiguration(configArray)) {
-        std::cerr << "IMU rejected the output configuration." << std::endl;
-        return false;
-    }
-    if (!xsens_device->gotoMeasurement()) {
-        std::cerr << "IMU refused to enter measurement mode." << std::endl;
+    if (!configureXsens100Hz(*xsens_device)) {
+        std::cerr << "IMU configuration/readback failed." << std::endl;
         return false;
     }
     return true;
@@ -265,63 +248,19 @@ bool PineappleSdk2Bridge::InitXsensIMU()
 
 void PineappleSdk2Bridge::ProcessXsensData()
 {
-    // Carried across packets so a field missing from one packet keeps its last
-    // value instead of reverting.
-    ImuSample sample = xsens_imu_data->load();
-
-    uint16_t prev_counter = 0;
-    bool have_prev_counter = false;
-    uint64_t received = 0, dropped = 0, orientation_updates = 0;
-    auto last_report = std::chrono::steady_clock::now();
-
+    // Acquisition happens in the SDK callback. This thread only logs health;
+    // terminal I/O cannot hold up acquisition or DDS publication.
+    xsens_imu_data->resetTimingStats();
+    auto before = xsens_imu_data->load();
+    double last = imuMonotonicSeconds();
     while (is_running) {
-
-        while (xsens_callback.packetAvailable()) {
-            XsDataPacket packet = xsens_callback.getNextPacket();
-            ++received;
-
-            // XDI_PacketCounter is already requested in InitXsensIMU(); read it
-            // so loss is measured here rather than inferred from offline logs.
-            if (packet.containsPacketCounter()) {
-                const uint16_t counter = packet.packetCounter();
-                if (have_prev_counter) {
-
-                    const uint16_t gap = static_cast<uint16_t>(counter - prev_counter);
-                    if (gap > 1) dropped += gap - 1;
-                }
-                prev_counter = counter;
-                have_prev_counter = true;
-            }
-
-            if (packet.containsOrientation()) {
-                XsQuaternion q = packet.orientationQuaternion();
-                sample.quaternion[0] = q.w();
-                sample.quaternion[1] = q.x();
-                sample.quaternion[2] = q.y();
-                sample.quaternion[3] = q.z();
-                XsEuler euler = packet.orientationEuler();
-                sample.rpy[0] = euler.roll();
-                sample.rpy[1] = euler.pitch();
-                sample.rpy[2] = euler.yaw();
-            }
-            if (packet.containsRateOfTurnHR()) {
-                XsVector gyr_hr = packet.rateOfTurnHR();
-                for (int i = 0; i < 3; ++i) {
-                    sample.gyro[i] = gyr_hr[i];
-                }
-            }
-            if (packet.containsAccelerationHR()) {
-                XsVector acc_hr = packet.accelerationHR();
-                for (int i = 0; i < 3; ++i) {
-                    sample.accel[i] = acc_hr[i];
-                }
-            }
-
-            xsens_imu_data->store(sample);
-        }
-
-
-        XsTime::msleep(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const double now = imuMonotonicSeconds();
+        if (now - last < 1.0) continue;
+        const auto after = xsens_imu_data->load();
+        reportImu(before, after, now - last, now);
+        before = after;
+        last = now;
     }
 }
 
