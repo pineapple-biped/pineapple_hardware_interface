@@ -30,6 +30,7 @@ struct MotorPosLimit {
 struct MotorConfig {
     string dev_sn;  // USB2CANFD serial number, from scan_canfd_sn
     bool set_zero = false;
+    bool have_imu = false;  // bring up the Xsens MTi and publish its orientation
     vector<uint16_t> can_id_list;
     vector<uint16_t> mst_id_list;
     vector<int> motor_type;
@@ -54,7 +55,7 @@ public:
     void AddMotorOffset();
 
     // IMU related
-    void InitXsensIMU();
+    bool InitXsensIMU();
     void ProcessXsensData();
     void CloseXsensIMU();
 
@@ -69,7 +70,9 @@ public:
 
     int dim_motor_sensor_ = 0;
 
-    int have_imu_ = true;
+    // Resolved from the platform configs in the ctor, then cleared again if
+    // the MTi cannot actually be brought up.
+    bool have_imu_ = false;
 
     // Concatenation of all platform configs, indexed by global joint index.
     int num_motor_ = 0;
@@ -109,6 +112,8 @@ public:
     // IMU related
     std::thread xsens_imu_thread;
     std::shared_ptr<ImuSharedData> xsens_imu_data;
+
+    static constexpr int kImuOutputRateHz = 100;
     XsControl* xsens_control = nullptr;
     XsPortInfo xsens_mtPort;
     CallbackHandler xsens_callback;
