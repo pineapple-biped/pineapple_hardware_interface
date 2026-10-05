@@ -65,12 +65,27 @@ Create `/etc/udev/rules.d/99-pineapple-imu-latency.rules` with the following lin
 replacing `VID`, `PID` and `SERIAL` with the IMU USB device's values from the same
 parent block. Do not use the USB hub's IDs or apply this to every FTDI adapter.
 
-```udev
+Replace the three placeholders below before running this command:
+
+```sh
+sudo tee /etc/udev/rules.d/99-pineapple-imu-latency.rules >/dev/null <<'EOF'
 ACTION=="add", SUBSYSTEM=="usb-serial", ATTRS{idVendor}=="VID", ATTRS{idProduct}=="PID", ATTRS{serial}=="SERIAL", ATTR{latency_timer}="1"
+EOF
+sudo chmod 0644 /etc/udev/rules.d/99-pineapple-imu-latency.rules
+sudo udevadm control --reload-rules
 ```
 
-Run `sudo udevadm control --reload-rules`, reconnect the IMU with the interface
-stopped, and repeat the timer readback and probe. If no unique serial is present,
+With the hardware interface stopped, unplug and reconnect the IMU, then verify
+(replace `ttyUSB0` if its port number changed):
+
+```sh
+udevadm settle
+cat /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
+sudo ./build/imu_probe --measure
+```
+
+The timer must read `1` and the probe should report `PASS`. Reloading the rules
+alone does not apply them to an already-connected adapter. If no unique serial is present,
 use a device-specific rule rather than omitting the selector blindly.
 See [IMU delivery diagnostics](docs/IMU_DELIVERY.md) if the probe fails.
 
