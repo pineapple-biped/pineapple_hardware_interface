@@ -4,6 +4,8 @@
 #include <thread>
 #include <csignal>
 #include <memory>
+#include <sys/resource.h>
+#include <xscontroller/pineapple_poll_wait.h>
 #include "../imu/record_imu.hpp"
 #include <string>
 Journaller* gJournal = nullptr;
@@ -47,6 +49,8 @@ int main(int argc, char** argv)
     ImuOutputProfile profile;
     try { profile = imuOutputProfileFromEnvironment(); }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 2; }
+    std::cout << "[imu] SDK small-read wait=" << (pineappleLowLatencyPoll() ? 1 : 2)
+              << " ms (rebuild Xsens libraries for the opt-in override)\n";
     XsControl* control = XsControl::construct();
     if (!control) return 1;
     XsPortInfo port;
@@ -76,6 +80,7 @@ int main(int argc, char** argv)
         auto before = shared->load();
         auto start = before;
         double last = imuMonotonicSeconds(), begin = last;
+        rusage usage_before{}; getrusage(RUSAGE_SELF, &usage_before);
         bool healthy = true;
         if (recording) recorder.start();
         std::cout << "[imu] BEGIN measurement/recording: " << seconds << " seconds\n" << std::flush;
@@ -91,6 +96,18 @@ int main(int argc, char** argv)
                     profile, j, hz, 1000 * (now - after.received_at[j]),
                     after.max_field_gap_ms[j]);
             }
+            rusage usage_after{}; getrusage(RUSAGE_SELF, &usage_after);
+            const auto cpu = [](const rusage& u) {
+                return u.ru_utime.tv_sec + u.ru_stime.tv_sec
+                    + 1e-6 * (u.ru_utime.tv_usec + u.ru_stime.tv_usec);
+            };
+            std::cout << "[host] elapsed_s=" << now - begin
+                      << " process_cpu_pct=" << 100 * (cpu(usage_after) - cpu(usage_before)) / (now-last)
+                      << " minor_faults=" << usage_after.ru_minflt - usage_before.ru_minflt
+                      << " major_faults=" << usage_after.ru_majflt - usage_before.ru_majflt
+                      << " voluntary_switches=" << usage_after.ru_nvcsw - usage_before.ru_nvcsw
+                      << " involuntary_switches=" << usage_after.ru_nivcsw - usage_before.ru_nivcsw << '\n';
+            usage_before = usage_after;
             before = after;
             last = now;
         }

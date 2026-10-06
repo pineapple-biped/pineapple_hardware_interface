@@ -224,3 +224,68 @@ Offline plotting on a workstation with NumPy and Matplotlib (no robot connection
 python scripts/plot_imu_recording.py imu_recordings/static_TIMESTAMP.csv
 python scripts/plot_imu_recording.py imu_recordings/hand_motion_TIMESTAMP.csv
 ```
+
+## Investigating residual 2 ms batching and occasional long gaps
+
+In the Oct 6 raw captures, device timestamps advance every 10 ms for orientation
+and 0.9–1.0 ms for gyro/acceleration, without packet-counter gaps. Static gyro
+arrival gaps are below 0.2 ms in 52.3% of cases and between 1.8–2.2 ms in 47.0%.
+There are 34 gyro gaps >=5 ms, all between elapsed 27.03 and 29.99 seconds;
+maximum 7.36 ms. Acceleration shows the same late disturbance. The corresponding
+device gaps remain 1 ms. Hand-motion recording passed, maximum about 4.11 ms.
+
+A concrete software source of batching exists in the bundled SDK:
+`DataPoller::conjureUpWaitTime` waits 2 ms after reads smaller than 256 bytes;
+`StandardThread::threadMain` implements that wait. `SerialCommunicator` otherwise
+uses a nonblocking serial read; the parser drains queued messages together.
+This is separate from our removed application queue and the FTDI latency timer.
+It matches the regular 2 ms arrival pattern but does not by itself establish the
+cause of the late 7.36 ms stalls. USB buffering and OS scheduling remain possible.
+
+The recorder reserves a bounded vector before opening the IMU and writes CSV
+only after capture stops. It does not reallocate within capacity. Reserving
+memory does not guarantee all pages are resident: page faults, SDK allocations,
+and process scheduling still need measurement. The probe now reports once-per-
+second process CPU, page-fault and context-switch deltas. These are process-wide,
+not receive-thread attribution; they provide correlation rather than proof.
+
+An opt-in comparison reduces the SDK small-read wait to 1 ms without busy-spin,
+realtime priorities, changed rates/gains, or relaxed failure thresholds. The
+stock behavior is retained unless `PINEAPPLE_XSENS_LOW_LATENCY=1` is set.
+This affects the bundled SDK; it MUST be rebuilt before comparing:
+
+```sh
+git pull --ff-only
+make -C xspublic clean && make -C xspublic -j2 &&
+cmake --build build -j2 &&
+ctest --test-dir build --output-on-failure
+```
+
+With the controller and hardware interface stopped and the robot supported,
+run both IMU-only cases, otherwise identical. Keep the FTDI timer at 1 ms.
+No CAN, DDS or motor code is initialized by these probe commands:
+
+```sh
+mkdir -p imu_recordings
+set -o pipefail
+stamp=$(date +%Y%m%d_%H%M%S)
+sudo env PINEAPPLE_IMU_PROFILE=fast PINEAPPLE_XSENS_LOW_LATENCY=0 \
+  ./build/imu_probe --measure --seconds 30 \
+  --record "imu_recordings/poll2_${stamp}.csv" 2>&1 | tee "imu_recordings/poll2_${stamp}.log"
+
+stamp=$(date +%Y%m%d_%H%M%S)
+sudo env PINEAPPLE_IMU_PROFILE=fast PINEAPPLE_XSENS_LOW_LATENCY=1 \
+  ./build/imu_probe --measure --seconds 30 \
+  --record "imu_recordings/poll1_${stamp}.csv" 2>&1 | tee "imu_recordings/poll1_${stamp}.log"
+```
+
+Keep the robot untouched throughout; note any other programs launched during the
+run. Send all CSV/log files. Compare the arrival-gap distribution, >=5 ms events,
+device gaps, CPU cost and fault/scheduling counters. A faster mean rate alone is
+not success. If the regular 2 ms bands shrink but long gaps remain, treat those
+as a separate host/transport problem. USB/kernel traces would then be needed to
+localize earlier delay; syscall tracing can itself perturb timing.
+
+Offline: library and full-interface/probe builds pass, as do both CTest suites.
+No physical low-latency-mode result has been measured here. Do not label this as
+a verified robot-side latency fix until paired recordings support it.

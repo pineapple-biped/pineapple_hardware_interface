@@ -2,6 +2,7 @@
 #include "../imu/output_profile.hpp"
 #include "../imu/record_imu.hpp"
 #include <atomic>
+#include <xscontroller/pineapple_poll_wait.h>
 #include <cassert>
 #include <thread>
 
@@ -21,6 +22,12 @@ XsDataPacket packet(uint16_t counter, uint32_t ticks, double pitch)
 
 int main()
 {
+    assert(pineapplePollWaitMs(0, false) == 3);
+    assert(pineapplePollWaitMs(128, false) == 2);
+    assert(pineapplePollWaitMs(128, true) == 1);
+    assert(pineapplePollWaitMs(0, true) == 1);
+    assert(pineapplePollWaitMs(256, false) == 0);
+    assert(pineapplePollWaitMs(256, true) == 0);
     const auto fast = imuOutputProfile("fast");
     assert(fast.hz[0] == 100 && fast.hz[1] == 1000 && fast.minimum_baud == 2000000);
     assert(imuOutputProfile("baseline").hz[2] == 100);

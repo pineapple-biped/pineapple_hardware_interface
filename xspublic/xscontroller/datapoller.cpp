@@ -64,6 +64,7 @@
 
 #include "datapoller.h"
 #include "dataparser.h"
+#include "pineapple_poll_wait.h"
 
 /*! \brief Create a DataPoller with a \a parser */
 
@@ -90,11 +91,7 @@ DataPoller::~DataPoller()
 /*! \brief Conjure up the time to wait based on properties of the received data (like the length) */
 int32_t DataPoller::conjureUpWaitTime(const XsByteArray& bytes) const
 {
-	if (bytes.size() == 0)
-		return 3;
-	else if (bytes.size() < 256)
-		return 2;
-	return 0;
+	return pineapplePollWaitMs(bytes.size(), pineappleLowLatencyPoll());
 }
 
 /*! \brief Init function for the thread, sets the priority higher
