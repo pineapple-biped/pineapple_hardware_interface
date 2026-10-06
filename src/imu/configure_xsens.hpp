@@ -7,9 +7,10 @@
 #include "output_profile.hpp"
 
 // Same explicit profile is used by the probe and full hardware interface.
-inline bool configureXsens(XsDevice& device, const ImuOutputProfile& profile, int baud)
+inline bool configureXsens(XsDevice& device, const ImuOutputProfile& profile, XsBaudRate rate)
 {
-    if (baud < profile.minimum_baud) {
+    const int baud = XsBaud::rateToNumeric(rate);
+    if (!imuProfileSupportsBaud(profile, rate)) {
         std::cerr << "[imu] Selected profile requires baud >= " << profile.minimum_baud
                   << "; detected " << baud << ". No baud change was made.\n";
         return false;

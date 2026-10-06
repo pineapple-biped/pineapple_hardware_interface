@@ -23,6 +23,11 @@ int main()
     const auto fast = imuOutputProfile("fast");
     assert(fast.hz[0] == 100 && fast.hz[1] == 1000 && fast.minimum_baud == 2000000);
     assert(imuOutputProfile("baseline").hz[2] == 100);
+    // Linux uses enum 4107 for 2 Mbaud; integer casts must never gate profiles.
+    assert(imuProfileSupportsBaud(fast, XsBaud::numericToRate(2000000)));
+    assert(!imuProfileSupportsBaud(fast, XsBaud::numericToRate(115200)));
+    assert(imuProfileSupportsBaud(imuOutputProfile("baseline"), XsBaud::numericToRate(115200)));
+    assert(!imuProfileSupportsBaud(imuOutputProfile("baseline"), XsBaud::numericToRate(9600)));
     bool rejected = false;
     try { imuOutputProfile("typo"); } catch (const std::invalid_argument&) { rejected = true; }
     assert(rejected);

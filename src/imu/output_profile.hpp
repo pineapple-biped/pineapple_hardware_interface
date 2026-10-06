@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <xstypes/xsbaud.h>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
@@ -31,4 +32,10 @@ inline bool imuDeliveryWindowHealthy(const ImuOutputProfile& profile,
     return hz >= .9 * profile.hz.at(field) && hz <= 1.1 * profile.hz.at(field)
         && age_ms >= 0 && age_ms < profile.max_gap_ms.at(field)
         && max_gap_ms < profile.max_gap_ms.at(field);
+}
+
+// XsBaudRate is a platform-dependent enum, not bits per second.
+inline bool imuProfileSupportsBaud(const ImuOutputProfile& profile, XsBaudRate rate)
+{
+    return XsBaud::rateToNumeric(rate) >= profile.minimum_baud;
 }

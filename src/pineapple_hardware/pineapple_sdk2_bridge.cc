@@ -265,7 +265,7 @@ bool PineappleSdk2Bridge::InitXsensIMU()
     xsens_callback.setTarget(xsens_imu_data);
     xsens_device->addCallbackHandler(&xsens_callback);
     if (!configureXsens(*xsens_device, imuOutputProfileFromEnvironment(),
-                        static_cast<int>(xsens_mtPort.baudrate()))) {
+                        xsens_mtPort.baudrate())) {
         std::cerr << "IMU configuration/readback failed." << std::endl;
         return false;
     }

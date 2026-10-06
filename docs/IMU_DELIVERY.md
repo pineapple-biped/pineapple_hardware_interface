@@ -36,6 +36,7 @@ checkout does not update an existing executable. `git rev-parse --short HEAD`
 records the source revision; `git status --short` shows local modifications.
 
 ```sh
+make -C xspublic clean
 make -C xspublic -j2
 cmake -S . -B build
 cmake --build build -j2 --target pineapple_hardware_interface imu_probe test_imu_delivery
@@ -161,3 +162,10 @@ Offline validation: all hardware-interface/probe/test targets compile; the two
 CTest suites pass. Tests cover profile selection, invalid-profile rejection,
 rate mismatch, per-field stale/burst checks and existing delivery/watchdog cases.
 The fast profile has not been validated on the physical MTi by this code change.
+
+Baud validation uses the SDK's enum-to-numeric conversion. A diagnostic such as
+`baud=2000000` followed by `detected 4107` indicates the original profile patch's
+conversion bug; update and rebuild before probing. SDK baud enums are not baud
+numbers. Regression tests cover acceptance at 2 Mbaud and rejection at low rates.
+Clean Xsens objects before the first build after switching branches or machines:
+the repository contains compiled objects that may belong to another architecture.

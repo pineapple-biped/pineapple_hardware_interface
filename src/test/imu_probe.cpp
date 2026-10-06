@@ -39,7 +39,7 @@ int main(int argc, char** argv)
     callback.setTarget(shared);
     device->addCallbackHandler(&callback);
     int result = 1;
-    if (configureXsens(*device, profile, static_cast<int>(port.baudrate()))) {
+    if (configureXsens(*device, profile, port.baudrate())) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
         shared->resetTimingStats();
         auto before = shared->load();
