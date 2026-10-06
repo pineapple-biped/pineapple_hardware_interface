@@ -169,3 +169,58 @@ conversion bug; update and rebuild before probing. SDK baud enums are not baud
 numbers. Regression tests cover acceptance at 2 Mbaud and rejection at low rates.
 Clean Xsens objects before the first build after switching branches or machines:
 the repository contains compiled objects that may belong to another architecture.
+
+## Motor-free stationary and hand-motion recording
+
+`imu_probe --measure --seconds 60 --record NEW.csv` records raw per-packet IMU
+fields and SDK callback monotonic times, device SampleTimeFine ticks (0.1 ms),
+packet counters and field-presence bits. Missing fields are NaN, never invented
+or filled with a previous value. Quaternion values are recorded before the
+bridge's normalization. This executable has no CAN/DDS/motor initialization.
+
+Stop the existing controller/interface with the robot physically supported.
+Do not rely on active balancing or motor torque to support it. Keep the IMU fixed
+to the torso; gently rock the supported body rather than shaking cables or
+striking the sensor. Do not run the full hardware interface for this test.
+
+Update/rebuild the probe, confirm FTDI timer=1, then record two separate runs:
+
+```sh
+mkdir -p imu_recordings
+stamp=$(date +%Y%m%d_%H%M%S)
+set -o pipefail
+sudo env PINEAPPLE_IMU_PROFILE=fast ./build/imu_probe --measure --seconds 30 \
+  --record "imu_recordings/static_${stamp}.csv" 2>&1 | tee "imu_recordings/static_${stamp}.log"
+
+stamp=$(date +%Y%m%d_%H%M%S)
+sudo env PINEAPPLE_IMU_PROFILE=fast ./build/imu_probe --measure --seconds 60 \
+  --record "imu_recordings/hand_motion_${stamp}.csv" 2>&1 | tee "imu_recordings/hand_motion_${stamp}.log"
+```
+
+For static: do not touch the robot for the whole 30 seconds.
+For hand motion, use the printed BEGIN/elapsed time: 0–10 s still; 10–25 s gentle
+pitch motion; 25–40 s gentle roll motion; 40–50 s gentle yaw motion if the fixture
+allows it; 50–60 s still. These are operator instructions, not automated phase
+labels. Note any deviations when sharing data. No violent/high-frequency shaking
+is needed. Record the mounting orientation and whether the feet/wheels or frame
+were supported. Do not interpret the moving trace's standard deviation as noise.
+
+Wait for the final recording line. It reports row count, capture_dropped and
+interrupted. Existing CSVs are rejected before device access. Capture buffers are
+preallocated in RAM (bounded duration 1–120 seconds), with no disk writes in the
+callback; the CSV is written on completion or graceful Ctrl-C/SIGTERM. Forced kill
+or power loss can lose buffered data. Retain the log even if the delivery check
+fails: the CSV remains useful, and failures/overflow must not be hidden.
+
+Send both CSVs and both logs for analysis. Unlike one-second probe summaries,
+these contain raw waveforms for separate orientation, gyro, acceleration and
+timing plots. They still do not measure absolute internal filter latency or
+motor/controller timing. Device-clock and host-clock gaps can reveal batching;
+relative attitude/gyro lag under motion includes sensor fusion dynamics.
+
+Offline plotting on a workstation with NumPy and Matplotlib (no robot connection):
+
+```sh
+python scripts/plot_imu_recording.py imu_recordings/static_TIMESTAMP.csv
+python scripts/plot_imu_recording.py imu_recordings/hand_motion_TIMESTAMP.csv
+```

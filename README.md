@@ -187,3 +187,8 @@ See [profile validation and full-interface commands](docs/IMU_DELIVERY.md#explic
 The full interface must receive the same environment variable; otherwise it
 reconfigures baseline rates. Actual high-rate delivery remains to be tested on
 the robot. Motor configuration and gains are unchanged.
+
+For motor-free raw data collection, `imu_probe --measure --seconds 60 --record NEW.csv`
+records individual IMU packets, timestamps and field-presence flags. See the
+[stationary/hand-motion recording protocol](docs/IMU_DELIVERY.md#motor-free-stationary-and-hand-motion-recording).
+The controller and normal hardware interface must remain stopped.

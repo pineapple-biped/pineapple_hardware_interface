@@ -1,5 +1,6 @@
 #include "../imu/xsens_imu.hpp"
 #include "../imu/output_profile.hpp"
+#include "../imu/record_imu.hpp"
 #include <atomic>
 #include <cassert>
 #include <thread>
@@ -35,6 +36,26 @@ int main()
     assert(!imuDeliveryWindowHealthy(fast, 1, 1000, 1, 50)); // bursts despite correct mean
     assert(!imuDeliveryWindowHealthy(fast, 1, 100, 1, 2));
     assert(!imuDeliveryWindowHealthy(fast, 0, 100, 25, 10));
+    ImuRecorder recorder(2);
+    recorder.capture(packet(1, 10, .1), 1); // disabled until explicitly started
+    assert(recorder.size() == 0);
+    recorder.start();
+    recorder.capture(packet(1, 10, .1), 1);
+    XsDataPacket partial_record;
+    XsVector g(3); g[0] = .2; g[1] = 0; g[2] = 0;
+    partial_record.setRateOfTurnHR(g);
+    recorder.capture(partial_record, 1.001);
+    recorder.capture(packet(2, 20, .1), 1.002);
+    recorder.stop();
+    assert(recorder.size() == 2 && recorder.dropped() == 1);
+    FILE* csv = std::tmpfile(); assert(csv);
+    assert(recorder.write(csv)); std::rewind(csv);
+    char line[1024]; assert(std::fgets(line, sizeof(line), csv));
+    assert(std::fgets(line, sizeof(line), csv));
+    assert(std::string(line).find(",1,10,7,") != std::string::npos);
+    assert(std::fgets(line, sizeof(line), csv));
+    assert(std::string(line).find(",-1,-1,2,nan,nan,nan,nan,") != std::string::npos);
+    std::fclose(csv);
     ImuSharedData s;
     // Device and packet counter rollover must not cause a false loss spike.
     s.ingest(packet(65535, 0xffffffce, .1), 1.0);
