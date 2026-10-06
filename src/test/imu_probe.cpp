@@ -16,7 +16,7 @@ void stopProbe(int) { stop_requested = 1; }
 int main(int argc, char** argv)
 {
     int seconds = 10;
-    std::string output;
+    std::string output, trace_output;
     bool measure = false;
     try {
         for (int i = 1; i < argc; ++i) {
@@ -28,8 +28,9 @@ int main(int argc, char** argv)
                 if (used != value.size() || seconds < 1 || seconds > 120)
                     throw std::invalid_argument("seconds must be 1..120");
             } else if (arg == "--record" && i+1 < argc) output = argv[++i];
+            else if (arg == "--trace" && i+1 < argc) trace_output = argv[++i];
             else if (arg == "--help") {
-                std::cout << "Usage: imu_probe --measure [--seconds 1..120] [--record NEW.csv]\n"
+                std::cout << "Usage: imu_probe --measure [--seconds 1..120] [--record NEW.csv] [--trace NEW.trace.csv]\n"
                           << "PINEAPPLE_IMU_PROFILE=baseline or fast. IMU only; no CAN, DDS or motors.\n"
                           << "Stop the hardware interface first. Recording begins after warmup.\n";
                 return 0;
@@ -42,6 +43,13 @@ int main(int argc, char** argv)
     if (!output.empty()) {
         recording.reset(std::fopen(output.c_str(), "wx"));
         if (!recording) { std::perror("Cannot create new recording"); return 2; }
+    }
+    std::unique_ptr<FILE, decltype(&std::fclose)> trace_file(nullptr, &std::fclose);
+    if (!trace_output.empty()) {
+        if (output.empty()) { std::cerr << "--trace requires --record\n"; return 2; }
+        trace_file.reset(std::fopen(trace_output.c_str(), "wx"));
+        if (!trace_file) { std::perror("Cannot create new trace"); return 2; }
+        pineappleDeliveryTrace().prepare(static_cast<size_t>(seconds + 2) * 24000);
     }
     std::signal(SIGINT, stopProbe);
     std::signal(SIGTERM, stopProbe);
@@ -83,6 +91,7 @@ int main(int argc, char** argv)
         rusage usage_before{}; getrusage(RUSAGE_SELF, &usage_before);
         bool healthy = true;
         if (recording) recorder.start();
+        if (trace_file) pineappleDeliveryTrace().enabled.store(true);
         std::cout << "[imu] BEGIN measurement/recording: " << seconds << " seconds\n" << std::flush;
         for (int i = 0; i < seconds && !stop_requested; ++i) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -122,6 +131,7 @@ int main(int argc, char** argv)
                   << "does not measure absolute sensor/filter latency.\n";
         result = healthy ? 0 : 1;
     }
+    pineappleDeliveryTrace().enabled.store(false);
     recorder.stop();
     control->closePort(port.portName().toStdString());
     if (recording) {
@@ -133,5 +143,13 @@ int main(int argc, char** argv)
                   << " interrupted=" << stop_requested << '\n';
     }
     control->destruct();
+    if (trace_file) {
+        const bool written = pineappleDeliveryTrace().write(trace_file.get());
+        const bool flushed = std::fflush(trace_file.get()) == 0;
+        const auto dropped = pineappleDeliveryTrace().dropped();
+        std::cout << "[trace] events=" << pineappleDeliveryTrace().next.load()
+                  << " dropped=" << dropped << " file=" << trace_output << '\n';
+        if (!written || !flushed || dropped) result = 1;
+    }
     return result;
 }

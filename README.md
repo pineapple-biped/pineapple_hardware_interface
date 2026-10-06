@@ -192,3 +192,60 @@ For motor-free raw data collection, `imu_probe --measure --seconds 60 --record N
 records individual IMU packets, timestamps and field-presence flags. See the
 [stationary/hand-motion recording protocol](docs/IMU_DELIVERY.md#motor-free-stationary-and-hand-motion-recording).
 The controller and normal hardware interface must remain stopped.
+
+### Diagnose intermittent IMU delivery (motors off)
+
+The 120-second FAST/1 ms test still showed intermittent 7.42 ms gyro arrival
+intervals despite continuous packet counters and regular device timestamps.
+A short passing test is not proof that stalls are eliminated.
+
+On `fix/imu-rate-profiles`, rebuild the modified SDK and probe (cleaning the SDK
+also removes any checked-in objects built for another CPU architecture):
+
+```bash
+cd ~/pineapple_hardware_interface
+git pull --ff-only
+make -C xspublic clean && make -C xspublic -j2 &&
+  cmake --build build -j2 && ctest --test-dir build --output-on-failure
+```
+
+Stop the controller and hardware interface. Confirm the adapter's
+`latency_timer` reads `1`. The following probe opens only the IMU; it does not
+initialize CAN, DDS, or motors. Leave the supported robot stationary for this
+delivery test; motion is not required to reproduce the stalls.
+
+```bash
+mkdir -p imu_recordings
+stamp=$(date +%Y%m%d_%H%M%S)
+sudo env PINEAPPLE_IMU_PROFILE=fast PINEAPPLE_XSENS_LOW_LATENCY=1 \
+  ./build/imu_probe --measure --seconds 120 \
+  --record "imu_recordings/trace_${stamp}.csv" \
+  --trace "imu_recordings/trace_${stamp}.trace.csv" \
+  > "imu_recordings/trace_${stamp}.log" 2>&1
+```
+
+Upload all three files, including when the probe reports FAIL. Existing CSVs
+are never overwritten. Tracing is opt-in, allocates roughly 94 MB at 120 s
+before device startup, and writes after SDK shutdown. It uses a bounded,
+preinitialized event buffer; `[trace] dropped` must be zero for a complete
+trace. The sensor recorder has a separate drop count. Tracing itself adds
+measurement overhead; compare against the previous untraced recording.
+
+Trace times use the same host monotonic clock as the sensor CSV. `source`
+identifies a parser or callback instance, not a sensor timestamp. Events can
+be out of time order across threads: sort by time for visualization.
+
+- `read_begin/end`: SDK stream read entry/return; end value is byte count.
+  A long interval between calls points toward poller wakeup/scheduling;
+  regularly attempted empty reads followed by a burst point upstream of parsing.
+  These markers cannot distinguish USB buffering from sensor transport alone.
+- `enqueue/dequeue`: byte chunk pushed/popped under the parser queue mutex;
+  pair FIFO per parser source. First/last capture chunks may be unmatched.
+- `parse_begin/end`: raw-byte parsing; values are bytes and decoded message count.
+- `dispatch_begin/end`: message handling (message ID), enclosing downstream callbacks.
+- `callback_begin/end`: shared IMU snapshot update; begin value is packet counter,
+  or -1 if unavailable. Match counters to sensor CSV with wraparound accounted for.
+- `read_error`: SDK read return code on unsuccessful reads.
+
+This diagnostic does not change gains, filtering, sensor rates, scheduling
+priorities, or motor commands, and does not measure absolute sensor/filter latency.

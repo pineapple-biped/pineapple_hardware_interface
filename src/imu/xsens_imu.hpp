@@ -1,4 +1,5 @@
 #pragma once
+#include <xscontroller/pineapple_delivery_trace.h>
 
 #include <xscontroller/xscallback.h>
 #include <xstypes/xsdatapacket.h>
@@ -131,7 +132,10 @@ protected:
     {
         // Publish immediately; no five-packet queue or extra polling thread.
         // No I/O, sleeping, or motor operations in the SDK callback.
+        pineappleDeliveryTrace().emit("callback_begin", this,
+            packet && packet->containsPacketCounter() ? packet->packetCounter() : -1);
         if (packet && target_) target_->ingest(*packet, imuMonotonicSeconds());
+        pineappleDeliveryTrace().emit("callback_end", this, 0);
     }
 private:
     std::shared_ptr<ImuSharedData> target_;

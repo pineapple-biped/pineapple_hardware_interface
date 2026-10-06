@@ -62,6 +62,7 @@
 //  ARBITRATORS APPOINTED IN ACCORDANCE WITH SAID RULES.
 //  
 
+#include "pineapple_delivery_trace.h"
 #include "dataparser.h"
 #include "xscontrollerconfig.h"
 #include <xstypes/xsmessage.h>
@@ -98,6 +99,7 @@ void DataParser::addRawData(const XsByteArray& arr)
 {
 	xsens::Lock locky(&m_incomingMutex);
 	m_incoming.push(arr);
+	pineappleDeliveryTrace().emit("enqueue", this, arr.size());
 	locky.unlock();
 	m_newDataEvent.set();
 }
@@ -115,6 +117,7 @@ int32_t DataParser::innerFunction()
 	xsens::Lock lockIncoming(&m_incomingMutex);
 	while (!m_incoming.empty() && !isTerminating())
 	{
+		pineappleDeliveryTrace().emit("dequeue", this, m_incoming.front().size());
 		raw.append(m_incoming.front());
 		m_incoming.pop();
 		lockIncoming.unlock();
@@ -125,14 +128,18 @@ int32_t DataParser::innerFunction()
 		if (!raw.empty() && !isTerminating())
 		{
 			std::deque<XsMessage> msgs;
+			pineappleDeliveryTrace().emit("parse_begin", this, raw.size());
 			XsResultValue res = processBufferedData(raw, msgs);
+			pineappleDeliveryTrace().emit("parse_end", this, msgs.size());
 			JLTRACEG("Parse result " << res << ": " << msgs.size() << " messages");
 
 			if (res != XRV_TIMEOUT && res != XRV_TIMEOUTNODATA && !isTerminating())
 			{
 				for (XsMessage const& msg : msgs)
 				{
+					pineappleDeliveryTrace().emit("dispatch_begin", this, msg.getMessageId());
 					handleMessage(msg);
+					pineappleDeliveryTrace().emit("dispatch_end", this, msg.getMessageId());
 					if (isTerminating())
 						break;
 				}

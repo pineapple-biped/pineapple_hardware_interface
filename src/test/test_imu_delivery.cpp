@@ -22,6 +22,25 @@ XsDataPacket packet(uint16_t counter, uint32_t ticks, double pitch)
 
 int main()
 {
+    // Concurrent producers reserve distinct slots; bounded overflow is explicit.
+    auto& trace = pineappleDeliveryTrace();
+    trace.prepare(2000);
+    trace.emit("disabled", nullptr, 0);
+    assert(trace.next.load() == 0);
+    trace.enabled.store(true);
+    std::thread trace_a([&] { for (int i=0; i<1500; ++i) trace.emit("a", nullptr, i); });
+    std::thread trace_b([&] { for (int i=0; i<1500; ++i) trace.emit("b", nullptr, i); });
+    trace_a.join(); trace_b.join();
+    trace.enabled.store(false);
+    assert(trace.next.load() == 3000 && trace.dropped() == 1000);
+    for (const auto& event : trace.events) assert(event.stage && event.time > 0);
+    FILE* trace_csv = std::tmpfile();
+    assert(trace_csv && trace.write(trace_csv));
+    std::rewind(trace_csv);
+    char trace_line[256]; size_t lines = 0;
+    while (std::fgets(trace_line, sizeof(trace_line), trace_csv)) ++lines;
+    assert(lines == 2001);
+    std::fclose(trace_csv);
     assert(pineapplePollWaitMs(0, false) == 3);
     assert(pineapplePollWaitMs(128, false) == 2);
     assert(pineapplePollWaitMs(128, true) == 1);

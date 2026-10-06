@@ -62,6 +62,7 @@
 //  ARBITRATORS APPOINTED IN ACCORDANCE WITH SAID RULES.
 //  
 
+#include "pineapple_delivery_trace.h"
 #include "datapoller.h"
 #include "dataparser.h"
 #include "pineapple_poll_wait.h"
@@ -118,8 +119,13 @@ void DataPoller::cleanup()
 int32_t DataPoller::innerFunction(void)
 {
 	XsByteArray ba;
-	if (m_parser.readDataToBuffer(ba) != XRV_OK)
+	pineappleDeliveryTrace().emit("read_begin", &m_parser, 0);
+	const XsResultValue result = m_parser.readDataToBuffer(ba);
+	pineappleDeliveryTrace().emit("read_end", &m_parser, ba.size());
+	if (result != XRV_OK) {
+		pineappleDeliveryTrace().emit("read_error", &m_parser, result);
 		return 1;
+	}
 
 	int32_t retval = conjureUpWaitTime(ba);
 	if (ba.size())
