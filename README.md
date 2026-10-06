@@ -249,3 +249,56 @@ be out of time order across threads: sort by time for visualization.
 
 This diagnostic does not change gains, filtering, sensor rates, scheduling
 priorities, or motor commands, and does not measure absolute sensor/filter latency.
+
+### Controlled 500 Hz USB delivery comparison
+
+`PINEAPPLE_IMU_PROFILE=fast500` requests quaternion 100 Hz and gyro/acceleration
+500 Hz. It retains the 2 Mbaud requirement and the same delivery limits as
+`fast` (orientation 20 ms, gyro/acceleration 5 ms). `baseline` remains the
+default and `fast` remains 100/1000/1000 Hz. The SDK validates sensor output
+configuration readback: unsupported rates fail rather than silently falling back.
+
+This is an IMU-only diagnostic, not a controller deployment recommendation.
+The 1000 Hz USB trace showed 6.926 ms gaps between payload completions and
+occasional full 512-byte transfers. Reducing traffic tests whether transfer
+batching contributes. Keep the USB latency timer at 1 ms and
+`PINEAPPLE_XSENS_LOW_LATENCY=1`; change only the requested gyro/acceleration rate.
+Run the same 120-second probe/trace with simultaneous 150-second usbmon capture.
+
+After pulling `fix/imu-rate-profiles`, rebuild and test:
+
+```bash
+cmake --build build -j2 && ctest --test-dir build --output-on-failure
+```
+
+The SDK has not changed in this profile-only update; the previous trace-capable
+SDK build is required. With the hardware interface/controller stopped, the
+supported robot stationary, and usbmon already enabled, run:
+
+```bash
+mkdir -p imu_recordings
+stamp=$(date +%Y%m%d_%H%M%S)
+prefix="imu_recordings/usb500_${stamp}"
+sudo -v
+# The verified adapter is currently on bus 2. Recheck lsusb if reconnected.
+sudo timeout 150 cat /sys/kernel/debug/usb/usbmon/2u \
+  > "${prefix}.usbmon.txt" 2> "${prefix}.usbmon.log" &
+usb_capture_pid=$!
+sleep 1
+if sudo env PINEAPPLE_IMU_PROFILE=fast500 PINEAPPLE_XSENS_LOW_LATENCY=1 \
+  ./build/imu_probe --measure --seconds 120 \
+  --record "${prefix}.csv" --trace "${prefix}.trace.csv" \
+  > "${prefix}.log" 2>&1
+then
+  echo "Probe passed."
+else
+  echo "Probe failed; retain the files for diagnosis."
+fi
+wait "$usb_capture_pid" || true
+ls -lh "${prefix}"*
+```
+
+Upload all five files regardless of PASS/FAIL. Exit 124 from the USB timeout is
+expected. Check that usbmon output is nonempty and its error log is empty.
+Compare sample rate, tail gaps, packet continuity, and clock-offset variation;
+a lower output rate alone does not establish lower absolute sensor latency.

@@ -16,7 +16,9 @@ inline ImuOutputProfile imuOutputProfile(const std::string& name)
     if (name == "baseline") return {{100, 100, 100}, {20, 20, 20}, 115200};
     // High-rate mode is only enabled on the previously verified 2 Mbaud link.
     if (name == "fast") return {{100, 1000, 1000}, {20, 5, 5}, 2000000};
-    throw std::invalid_argument("PINEAPPLE_IMU_PROFILE must be baseline or fast");
+    // Controlled transport-load comparison: same baud and delivery limits as fast.
+    if (name == "fast500") return {{100, 500, 500}, {20, 5, 5}, 2000000};
+    throw std::invalid_argument("PINEAPPLE_IMU_PROFILE must be baseline, fast or fast500");
 }
 
 inline ImuOutputProfile imuOutputProfileFromEnvironment()
