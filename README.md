@@ -126,3 +126,48 @@ wheel first is the convention:
 sudo ./pineapple_hardware_interface ../config/config.yaml ../config/config_arm.yaml
 # joints 0-7 = wheel biped, joints 8-13 = arm
 ```
+
+## Command-timeout watchdog
+
+Branch `fix/command-watchdog` includes the IMU-freshness fixes and a latched
+command stop. Build and run the offline tests before installing on the robot:
+
+```sh
+git fetch origin
+git switch fix/command-watchdog
+cmake -S . -B build
+cmake --build build -j4
+ctest --test-dir build --output-on-failure
+```
+
+After the first valid `rt/lowcmd` frame, **100 ms without another accepted frame**
+latches the bridge off. A separate thread checks every 2 ms and repeatedly sends
+CAN motor-disable (`0xFD`) every 20 ms while latched. These intervals are scheduling
+targets, not a hard real-time guarantee or acknowledgment from the motors. Late
+commands cannot revive an expired session. Fault recovery cannot clear/enable
+motors after the latch. Stop the controller, resolve the cause and restart the
+bridge to rearm. Switching controllers with a gap over 100 ms also requires restart.
+
+Invalid/nonfinite command fields or gains outside the MIT encoder range also latch
+off before any motor in that frame is commanded. This is not full per-joint command
+validation. Normal SIGINT/SIGTERM shutdown requests disable as well. The watchdog
+waits for the first command at startup; it is not a startup interlock. Existing
+motor initialization/enable behavior is unchanged.
+
+**Hardware acceptance test (not yet performed):** use a rigidly supported base,
+clear wheels/legs and an independent emergency stop. With a known bounded command
+publisher running, suspend/stop only that publisher while leaving the bridge
+running. Check the watchdog message and confirm motor feedback reports disabled
+and the last target is no longer driven. Resume the publisher and verify motors
+remain disabled. Stop it again before restarting the bridge. Record the command
+gap and motor response; the offline test does not measure actual CAN stop latency.
+Disabling removes support torque: do not perform this test while balancing freely.
+
+Only confirm the sysid collector's `--watchdog-confirmed` after this physical test.
+The host watchdog protects publisher/network loss while the bridge and CAN remain
+operational. It cannot protect against a killed/frozen bridge, host power loss,
+USB/CAN failure or a frozen publisher continually retransmitting commands. Those
+need an independently configured and tested **motor firmware communication timeout**
+and emergency stop. The driver exposes a `TIMEOUT` register, but its units and
+supported firmware behavior have not been verified; this change does not write it.
+DDS receipt time is used, not a synchronized sensor/publisher clock.

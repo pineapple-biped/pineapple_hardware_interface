@@ -43,11 +43,10 @@ static const std::unordered_map<std::string, int> kMotorTypeByName = {
     {"DMG6220", damiao::DMG6220},
 };
 
-std::atomic<bool> running(true);
+volatile std::sig_atomic_t running = 1;
 
-void signalHandler(int signum) {
-    running = false;
-    std::cerr << "\nInterrupt signal (" << signum << ") received.\n";
+void signalHandler(int) {
+    running = 0;
 }
 
 Journaller* gJournal = 0; // Xsens IMU related
@@ -109,6 +108,7 @@ static bool LoadMotorConfig(const std::string &config_path, MotorConfig &motor_c
 int main(int argc, char **argv)
 {
     std::signal(SIGINT, signalHandler);
+    std::signal(SIGTERM, signalHandler);
 
     // Each config file describes one platform on its own USB2CANFD device.
     // Joint index order in LowCmd/LowState follows the argument order

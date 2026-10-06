@@ -4,6 +4,8 @@
 #include <iostream>
 #include <chrono>
 #include <cstring>
+#include <mutex>
+#include "command_watchdog.h"
 
 #include <unitree/robot/channel/channel_publisher.hpp>
 #include <unitree/robot/channel/channel_subscriber.hpp>
@@ -87,6 +89,11 @@ public:
     private:
 
     void HandleMotorFault(int motor_idx);
+    void WatchCommands();
+    void DisableMotorsLocked();
+    std::mutex motor_command_mutex_;
+    CommandWatchdog command_watchdog_;
+    std::thread command_watchdog_thread_;
     bool IsMotorConnected(int motor_idx) const;
 
     // Controller owning the given global joint index (one CAN bus per device).

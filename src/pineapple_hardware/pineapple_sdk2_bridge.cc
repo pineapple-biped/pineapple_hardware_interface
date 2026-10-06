@@ -45,9 +45,6 @@ PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_con
     last_fault_recovery_time_.resize(num_motor_, std::chrono::steady_clock::now());
     last_disconnect_log_time_.resize(num_motor_, std::chrono::steady_clock::now());
 
-    low_cmd_go_suber_.reset(new ChannelSubscriber<unitree_go::msg::dds_::LowCmd_>(TOPIC_LOWCMD));
-    low_cmd_go_suber_->InitChannel(bind(&PineappleSdk2Bridge::LowCmdGoHandler, this, placeholders::_1), 1);
-
     low_state_go_puber_.reset(new ChannelPublisher<unitree_go::msg::dds_::LowState_>(TOPIC_LOWSTATE));
     low_state_go_puber_->InitChannel();
     
@@ -74,13 +71,24 @@ PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_con
 
     init_time_ = std::chrono::steady_clock::now();
     last_poll_time_ = init_time_;
+    command_watchdog_thread_ = std::thread(&PineappleSdk2Bridge::WatchCommands, this);
+    low_cmd_go_suber_.reset(new ChannelSubscriber<unitree_go::msg::dds_::LowCmd_>(TOPIC_LOWCMD));
+    low_cmd_go_suber_->InitChannel(bind(&PineappleSdk2Bridge::LowCmdGoHandler, this, placeholders::_1), 1);
+
+
     lowStatePuberThreadPtr = CreateRecurrentThreadEx("lowstate", UT_CPU_ID_NONE, 2000, &PineappleSdk2Bridge::PublishLowStateGo, this);
 
 }
 
 PineappleSdk2Bridge::~PineappleSdk2Bridge()
 {
-    is_running = false;
+    {
+        std::lock_guard<std::mutex> lock(motor_command_mutex_);
+        is_running = false;
+        command_watchdog_.Trip();
+        DisableMotorsLocked();
+    }
+    if (command_watchdog_thread_.joinable()) command_watchdog_thread_.join();
 
 
     if (low_cmd_go_suber_) {
@@ -102,6 +110,8 @@ PineappleSdk2Bridge::~PineappleSdk2Bridge()
 
 void PineappleSdk2Bridge::SetMotorToZero()
 {
+    std::lock_guard<std::mutex> lock(motor_command_mutex_);
+    if (!is_running || command_watchdog_.Tripped()) return;
     for (int i = 0; i < num_motor_; i++)
     {
         CtrlOf(i)->set_zero_position(*CtrlOf(i)->getMotor(can_id_list[i]));
@@ -110,8 +120,23 @@ void PineappleSdk2Bridge::SetMotorToZero()
 
 void PineappleSdk2Bridge::LowCmdGoHandler(const void *msg)
 {
-    if (!is_running) return;
+    std::lock_guard<std::mutex> lock(motor_command_mutex_);
+    if (!is_running || command_watchdog_.Tripped()) return;
     const unitree_go::msg::dds_::LowCmd_ *cmd = (const unitree_go::msg::dds_::LowCmd_ *)msg;
+    // Validate the entire frame before applying any joint. Invalid commands latch off.
+    for (int i = 0; i < num_motor_; ++i) {
+        const auto &m = cmd->motor_cmd()[i];
+        if (!CommandWatchdog::Valid(m.q(), m.dq(), m.tau(), m.kp(), m.kd())) {
+            command_watchdog_.Trip();
+            DisableMotorsLocked();
+            std::cerr << "[watchdog] Invalid command; motors disabled. Restart bridge to rearm.\n";
+            return;
+        }
+    }
+    if (!command_watchdog_.Accept(CommandWatchdog::Clock::now())) {
+        DisableMotorsLocked();
+        return;
+    }
     for (int i = 0; i < num_motor_; i++)
     {
         auto motor = CtrlOf(i)->getMotor(can_id_list[i]);
@@ -150,6 +175,7 @@ void PineappleSdk2Bridge::PublishLowStateGo()
     auto poll_now = std::chrono::steady_clock::now();
     if (std::chrono::duration<double>(poll_now - last_poll_time_).count() >= poll_interval_sec_)
     {
+        std::lock_guard<std::mutex> lock(motor_command_mutex_);
         last_poll_time_ = poll_now;
         for (int i = 0; i < num_motor_; i++)
         {
@@ -272,6 +298,8 @@ bool PineappleSdk2Bridge::IsMotorConnected(int motor_idx) const
 
 void PineappleSdk2Bridge::HandleMotorFault(int i)
 {
+    std::lock_guard<std::mutex> lock(motor_command_mutex_);
+    if (!is_running || command_watchdog_.Check(CommandWatchdog::Clock::now())) return;
     auto now = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(now - last_fault_recovery_time_[i]).count();
     if (elapsed < 2.0) {
@@ -299,3 +327,36 @@ void PineappleSdk2Bridge::CloseXsensIMU()
     xsens_control = nullptr;
 }
 
+
+// Called only while holding motor_command_mutex_. No feedback is needed to disable.
+void PineappleSdk2Bridge::DisableMotorsLocked()
+{
+    for (int i = 0; i < num_motor_; ++i) {
+        auto motor = CtrlOf(i)->getMotor(can_id_list[i]);
+        CtrlOf(i)->control_cmd(can_id_list[i] + motor->GetMotorMode(), 0xFD);
+    }
+}
+
+void PineappleSdk2Bridge::WatchCommands()
+{
+    bool reported = false;
+    auto last_disable = CommandWatchdog::Time::min();
+    while (is_running) {
+        {
+            std::lock_guard<std::mutex> lock(motor_command_mutex_);
+            const auto now = CommandWatchdog::Clock::now();
+            if (command_watchdog_.Check(now)) {
+                if (!reported) {
+                    std::cerr << "[watchdog] Stop latched (command timeout or invalid frame). "
+                              << "Motors disabled; restart bridge to rearm.\n";
+                }
+                if (!reported || now - last_disable >= std::chrono::milliseconds(20)) {
+                    DisableMotorsLocked();
+                    last_disable = now;
+                }
+                reported = true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+}
