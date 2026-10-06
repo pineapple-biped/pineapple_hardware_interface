@@ -9,10 +9,14 @@ int main(int argc, char** argv)
 {
     if (argc != 2 || std::string(argv[1]) != "--measure") {
         std::cout << "Usage: imu_probe --measure\n"
-                  << "Configures IMU outputs to 100 Hz, measures for 10 seconds; no motors.\n"
+                  << "PINEAPPLE_IMU_PROFILE=baseline (100/100/100 Hz) or fast (100/1000/1000 Hz).\n"
+                  << "Measures for 10 seconds; no motors.\n"
                   << "Stop the hardware interface first so only one process owns the IMU.\n";
         return argc == 2 && std::string(argv[1]) == "--help" ? 0 : 2;
     }
+    ImuOutputProfile profile;
+    try { profile = imuOutputProfileFromEnvironment(); }
+    catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 2; }
     XsControl* control = XsControl::construct();
     if (!control) return 1;
     XsPortInfo port;
@@ -35,7 +39,7 @@ int main(int argc, char** argv)
     callback.setTarget(shared);
     device->addCallbackHandler(&callback);
     int result = 1;
-    if (configureXsens100Hz(*device)) {
+    if (configureXsens(*device, profile, static_cast<int>(port.baudrate()))) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
         shared->resetTimingStats();
         auto before = shared->load();
@@ -49,8 +53,9 @@ int main(int argc, char** argv)
             reportImu(before, after, now - last, now);
             for (size_t j = 0; j < 3; ++j) {
                 const double hz = (after.updates[j] - before.updates[j]) / (now - last);
-                healthy &= hz >= 90 && hz <= 110;
-                healthy &= after.received_at[j] > 0 && now - after.received_at[j] < .03;
+                healthy &= after.received_at[j] > 0 && imuDeliveryWindowHealthy(
+                    profile, j, hz, 1000 * (now - after.received_at[j]),
+                    after.max_field_gap_ms[j]);
             }
             before = after;
             last = now;

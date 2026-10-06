@@ -89,3 +89,75 @@ The complete hardware executable and IMU-only probe compile locally. The CTest
 suite exercises packet/timestamp rollover, dropped-packet accounting, missing
 fields, invalid quaternions, and concurrent snapshot consistency. No physical
 IMU or motors were accessed during development.
+
+## Explicit baseline / fast output profiles
+
+The default is still `baseline`: quaternion/gyro/acceleration at 100/100/100 Hz.
+The opt-in `fast` profile requests 100/1000/1000 Hz, requires a detected baud
+rate of at least 2,000,000, and verifies the actual output-configuration readback.
+It does not change the baud rate, motor calibration, PD gains or policy.
+Unsupported rates or insufficient baud are rejected; a requested IMU that fails
+startup now prevents the full bridge from accepting motor commands instead of
+continuing with identity orientation. A valid profile does not certify timely
+physical delivery: the probe must still pass on the robot.
+
+This branch includes the preceding IMU freshness and command-watchdog fixes.
+Preserve the robot's existing motor IDs, offsets, directions, limits and USB
+serial numbers when updating. Do not blindly replace a locally calibrated YAML
+or pop a stash of older IMU source over these changes.
+
+After rebuilding as above, stop the controller and hardware interface. Ensure
+no other process owns the IMU. Verify the FTDI latency timer persists at `1`:
+
+```sh
+cat /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
+# If it is not 1, use the device-specific persistent rule in README.md.
+sudo env PINEAPPLE_IMU_PROFILE=baseline ./build/imu_probe --measure 2>&1 | tee imu_baseline.log
+sudo env PINEAPPLE_IMU_PROFILE=fast ./build/imu_probe --measure 2>&1 | tee imu_fast.log
+```
+
+The explicit `sudo env` matters: plain `sudo` may strip environment variables.
+The probe configures only the sensor; it never connects to CAN or publishes DDS.
+With fast mode, expect configured rates 100/1000/1000 and received rates within
+10% of those values. The probe additionally requires per-field maximum callback
+update gaps and sampled host ages below 20/5/5 ms, no added missing packets and
+no invalid quaternions. Baseline per-field gap/age thresholds are 20/20/20 ms.
+These thresholds are diagnostic targets, not claimed measurements or stability
+guarantees. Mixed-rate packets can have several device timestamp spacings;
+do not expect every packet to have a 10 ms interval in fast mode.
+
+If fast fails, save its output and do not proceed to a balancing comparison.
+Re-run the baseline probe to restore the baseline sensor configuration. Do not
+relax thresholds just to obtain PASS. Increasing rate can reveal serial/SDK/CPU
+bottlenecks, which must be measured.
+
+After the fast probe exits successfully, the same profile must be selected for
+normal bridge startup; otherwise the default resets all fields to 100 Hz:
+
+```sh
+sudo env PINEAPPLE_IMU_PROFILE=fast ./build/pineapple_hardware_interface config/config_v3.yaml 2>&1 | tee interface_imu_fast.log
+```
+
+This last command starts the motor-capable hardware interface. Use the robot's
+reviewed config and the existing supervised hardware procedure. Run the deployed
+controller separately with its existing `use_ang_vel_filter: false`. Inspect the
+bridge's per-field rates, ages and maximum gaps under full load; probe success
+alone does not establish full-system delivery performance.
+
+For a controlled comparison, record separate baseline and fast trials with the
+same checkpoint, commanded motion, gains, pose and support conditions. Record
+source commit, local diff, config hash and ONNX/checkpoint hash alongside MCAP.
+Do not change wheel Kv at the same time. Include deploy status/meta/cmd_vel topics
+where available; previous recordings omitted them, preventing policy attribution.
+
+These changes do not yet add device timestamps/field sequences to the DDS schema
+or instrument age at policy inference. The printed host age starts at the SDK
+callback, so device filtering and earlier USB buffering are not included. Lowstate
+still publishes at 500 Hz: a 1000 Hz gyro is sampled into that stream, rather than
+all 1000 samples being forwarded. Latest-value delivery can reduce sample age,
+but it is not an anti-alias filter or a zero-latency guarantee.
+
+Offline validation: all hardware-interface/probe/test targets compile; the two
+CTest suites pass. Tests cover profile selection, invalid-profile rejection,
+rate mismatch, per-field stale/burst checks and existing delivery/watchdog cases.
+The fast profile has not been validated on the physical MTi by this code change.

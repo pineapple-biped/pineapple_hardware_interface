@@ -1,4 +1,5 @@
 #include "../imu/xsens_imu.hpp"
+#include "../imu/output_profile.hpp"
 #include <atomic>
 #include <cassert>
 #include <thread>
@@ -19,6 +20,16 @@ XsDataPacket packet(uint16_t counter, uint32_t ticks, double pitch)
 
 int main()
 {
+    const auto fast = imuOutputProfile("fast");
+    assert(fast.hz[0] == 100 && fast.hz[1] == 1000 && fast.minimum_baud == 2000000);
+    assert(imuOutputProfile("baseline").hz[2] == 100);
+    bool rejected = false;
+    try { imuOutputProfile("typo"); } catch (const std::invalid_argument&) { rejected = true; }
+    assert(rejected);
+    assert(imuDeliveryWindowHealthy(fast, 1, 1000, 1, 2));
+    assert(!imuDeliveryWindowHealthy(fast, 1, 1000, 1, 50)); // bursts despite correct mean
+    assert(!imuDeliveryWindowHealthy(fast, 1, 100, 1, 2));
+    assert(!imuDeliveryWindowHealthy(fast, 0, 100, 25, 10));
     ImuSharedData s;
     // Device and packet counter rollover must not cause a false loss spike.
     s.ingest(packet(65535, 0xffffffce, .1), 1.0);
@@ -34,6 +45,10 @@ int main()
     partial.setPacketCounter(4);
     s.ingest(partial, 1.07);
     assert(s.load().received_at[0] == 1.06 && s.load().updates[0] == 3);
+    // A fast stream of partial packets cannot conceal a stale orientation field.
+    assert(s.load().max_field_gap_ms[0] > 49);
+    s.resetTimingStats();
+    assert(s.load().max_field_gap_ms[0] == 0);
     // Invalid quaternion is rejected; no new freshness is claimed.
     auto bad = packet(5, 450, .4);
     bad.setOrientationQuaternion(XsQuaternion(0, 0, 0, 0), XDI_CoordSysEnu);

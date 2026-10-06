@@ -59,8 +59,7 @@ PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_con
         if (have_imu_) {
             xsens_imu_thread = std::thread(&PineappleSdk2Bridge::ProcessXsensData, this);
         } else {
-            std::cerr << "IMU requested in config but could not be started; "
-                      << "orientation will not be published." << std::endl;
+            throw std::runtime_error("Required IMU failed configuration; refusing control startup");
         }
     }
     if (!have_imu_) {
@@ -265,7 +264,8 @@ bool PineappleSdk2Bridge::InitXsensIMU()
 
     xsens_callback.setTarget(xsens_imu_data);
     xsens_device->addCallbackHandler(&xsens_callback);
-    if (!configureXsens100Hz(*xsens_device)) {
+    if (!configureXsens(*xsens_device, imuOutputProfileFromEnvironment(),
+                        static_cast<int>(xsens_mtPort.baudrate()))) {
         std::cerr << "IMU configuration/readback failed." << std::endl;
         return false;
     }

@@ -27,6 +27,7 @@ struct ImuSample {
     std::array<double, 3> received_at = {0, 0, 0};
     std::array<uint64_t, 3> updates = {0, 0, 0};
     uint64_t packets = 0, missing_packets = 0, invalid_quaternions = 0;
+    std::array<double, 3> max_field_gap_ms = {0, 0, 0};
     double max_callback_gap_ms = 0;
     double device_interval_ms = 0;
 };
@@ -44,6 +45,7 @@ public:
     {
         std::lock_guard<std::mutex> lock(mutex_);
         sample_.max_callback_gap_ms = 0;
+        sample_.max_field_gap_ms = {0, 0, 0};
         last_callback_ = imuMonotonicSeconds();
     }
 
@@ -83,6 +85,9 @@ public:
                     sample_.quaternion[i] = value[i] / std::sqrt(norm);
                 const auto e = packet.orientationEuler();
                 sample_.rpy = {e.roll(), e.pitch(), e.yaw()};
+                if (sample_.received_at[0] > 0)
+                    sample_.max_field_gap_ms[0] = std::max(sample_.max_field_gap_ms[0],
+                        1000 * (now - sample_.received_at[0]));
                 sample_.received_at[0] = now;
                 ++sample_.updates[0];
             } else {
@@ -92,12 +97,18 @@ public:
         if (packet.containsRateOfTurnHR()) {
             const auto g = packet.rateOfTurnHR();
             for (size_t i = 0; i < 3; ++i) sample_.gyro[i] = g[i];
+            if (sample_.received_at[1] > 0)
+                sample_.max_field_gap_ms[1] = std::max(sample_.max_field_gap_ms[1],
+                    1000 * (now - sample_.received_at[1]));
             sample_.received_at[1] = now;
             ++sample_.updates[1];
         }
         if (packet.containsAccelerationHR()) {
             const auto a = packet.accelerationHR();
             for (size_t i = 0; i < 3; ++i) sample_.accel[i] = a[i];
+            if (sample_.received_at[2] > 0)
+                sample_.max_field_gap_ms[2] = std::max(sample_.max_field_gap_ms[2],
+                    1000 * (now - sample_.received_at[2]));
             sample_.received_at[2] = now;
             ++sample_.updates[2];
         }
@@ -136,6 +147,9 @@ inline void reportImu(const ImuSample& before, const ImuSample& after,
     for (size_t i = 0; i < 3; ++i)
         std::cout << (after.received_at[i] ? 1000 * (now - after.received_at[i]) : -1)
                   << (i == 2 ? "" : "/");
+    std::cout << " max_field_gap_ms=";
+    for (size_t i = 0; i < 3; ++i)
+        std::cout << after.max_field_gap_ms[i] << (i == 2 ? "" : "/");
     std::cout << " max_callback_gap_ms=" << after.max_callback_gap_ms
               << " last_device_interval_ms=" << after.device_interval_ms
               << " missing_packets=" << after.missing_packets

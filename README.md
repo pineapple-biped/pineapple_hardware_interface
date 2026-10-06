@@ -171,3 +171,19 @@ need an independently configured and tested **motor firmware communication timeo
 and emergency stop. The driver exposes a `TIMEOUT` register, but its units and
 supported firmware behavior have not been verified; this change does not write it.
 DDS receipt time is used, not a synchronized sensor/publisher clock.
+
+## Optional faster gyro and acceleration
+
+Default IMU output remains 100/100/100 Hz. On the verified 2 Mbaud link, an
+explicit `PINEAPPLE_IMU_PROFILE=fast` requests quaternion/gyro/acceleration at
+100/1000/1000 Hz, with configuration readback and per-field timing checks.
+Start with the IMU-only probe, with the normal interface stopped:
+
+```sh
+sudo env PINEAPPLE_IMU_PROFILE=fast ./build/imu_probe --measure
+```
+
+See [profile validation and full-interface commands](docs/IMU_DELIVERY.md#explicit-baseline--fast-output-profiles).
+The full interface must receive the same environment variable; otherwise it
+reconfigures baseline rates. Actual high-rate delivery remains to be tested on
+the robot. Motor configuration and gains are unchanged.
