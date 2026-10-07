@@ -3,10 +3,12 @@
 
 # ruff: noqa: B905 -- support robot Python versions older than 3.10
 import argparse
+import dataclasses
 import gc
 import json
 import math
 import struct
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -58,7 +60,7 @@ def measurement_gc(mode):
       gc.disable()
 
 
-def run(seconds, hz, output, gc_mode="normal"):
+def run(seconds, hz, output, gc_mode="normal", recorder=None, record_path=None):
   # Importing these initializes no command publisher. Only a subscriber is created.
   from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
   from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
@@ -70,6 +72,10 @@ def run(seconds, hz, output, gc_mode="normal"):
   errors = []
   observations = []
   accepting = True
+  recording = False
+  recorded = 0
+  recording_errors = []
+  serialization_ms = []
   gc_starts = {}
   gc_pauses = []
 
@@ -82,7 +88,7 @@ def run(seconds, hz, output, gc_mode="normal"):
       gc_pauses.append((gc_starts.pop(generation), now, generation))
 
   def callback(message):
-    nonlocal latest
+    nonlocal latest, recorded
     now = time.monotonic()
     try:
       sample = decode(message, now)
@@ -95,6 +101,15 @@ def run(seconds, hz, output, gc_mode="normal"):
       if accepting:
         latest = sample
         rows.append(sample)
+        if recording and recorder is not None:
+          started = time.monotonic()
+          try:
+            # Same serialization and bounded writer queue as sysid collection.
+            recorder.add("rt/lowstate", int(now * 1e9), dataclasses.asdict(message))
+            recorded += 1
+          except Exception as exc:
+            recording_errors.append(str(exc))
+          serialization_ms.append((time.monotonic() - started) * 1000)
 
   sub = ChannelSubscriber("rt/imu_probe/lowstate", LowState_)
   sub.Init(callback, 10)  # Same queue length as deployment subscriber.
@@ -112,6 +127,7 @@ def run(seconds, hz, output, gc_mode="normal"):
       with lock:
         rows.clear()
         errors.clear()
+        recording = True
       begin = time.monotonic()
       next_tick = begin
       while time.monotonic() - begin < seconds:
@@ -126,13 +142,36 @@ def run(seconds, hz, output, gc_mode="normal"):
         next_tick += 1 / hz
         time.sleep(max(0, next_tick - time.monotonic()))
       end = time.monotonic()
+      with lock:
+        accepting = False
   finally:
     gc.callbacks.remove(gc_event)
     with lock:
       accepting = False
-    sub.Close()
+    try:
+      sub.Close()
+    finally:
+      if recorder is not None:
+        recorder.close()
   if len(rows) < 2:
     raise RuntimeError("Insufficient DDS samples")
+  if recorder is not None:
+    from mcap.reader import make_reader
+
+    replayed = 0
+    with record_path.open("rb") as f:
+      for _, channel, message in make_reader(f, validate_crcs=True).iter_messages():
+        if channel.topic != "rt/lowstate":
+          raise RuntimeError("Unexpected recorded topic")
+        payload = json.loads(message.data)
+        if "imu_state" not in payload["data"]:
+          raise RuntimeError("Recorded message is missing IMU data")
+        replayed += 1
+    if replayed != recorded or recording_errors:
+      raise RuntimeError(
+        f"Recorder failed: queued={recorded}, replayed={replayed}, "
+        f"errors={recording_errors[:3]}"
+      )
   seq = [r[0] for r in rows]
   steps = [(b - a) % (2**32) for a, b in zip(seq, seq[1:])]
   gaps = [(b[3] - a[3]) * 1000 for a, b in zip(rows, rows[1:])]
@@ -155,6 +194,16 @@ def run(seconds, hz, output, gc_mode="normal"):
     observation_snapshot_hold_ms=describe([(t - r[3]) * 1000 for t, r in observations]),
     observation_tick_gap_ms=describe(
       [(b[0] - a[0]) * 1000 for a, b in zip(observations, observations[1:])]
+    ),
+    recording=(
+      dict(
+        path=str(record_path),
+        queued=recorded,
+        replayed=replayed,
+        serialization_enqueue_ms=describe(serialization_ms),
+      )
+      if recorder is not None
+      else None
     ),
     fields={},
   )
@@ -220,6 +269,8 @@ def run(seconds, hz, output, gc_mode="normal"):
       "SDK receipt to observation age ms:",
       v["sdk_callback_to_observation_age_ms"],
     )
+  if result["recording"] is not None:
+    print("MCAP recorder:", result["recording"])
   print("GC mode:", gc_mode)
   print("GC events / pause ms:", result["gc_events"], result["gc_pause_ms"])
   print("Worst callback delays:", result["worst_callback_delays"])
@@ -240,6 +291,14 @@ def main():
   p.add_argument("--seconds", type=int, default=120)
   p.add_argument("--observation-hz", type=float, default=50)
   p.add_argument("--output", type=Path, required=True)
+  p.add_argument(
+    "--record-mcap",
+    type=Path,
+    help="Record diagnostic LowState with the actual sysid MCAP writer",
+  )
+  p.add_argument(
+    "--sysid-root", type=Path, help="Checkout containing pineapple_sysid/collect.py"
+  )
   a = p.parse_args()
   if not 1 <= a.seconds <= 240 or not 1 <= a.observation_hz <= 500:
     p.error("seconds 1..240; observation-hz 1..500")
@@ -247,8 +306,22 @@ def main():
     p.error("Output exists; choose a new filename")
   if not a.output.parent.is_dir():
     p.error("Output directory does not exist")
+  if bool(a.record_mcap) != bool(a.sysid_root):
+    p.error("Use --record-mcap and --sysid-root together")
+  recorder = None
+  if a.record_mcap:
+    if a.record_mcap.exists():
+      p.error("MCAP output exists; choose a new filename")
+    if not (a.sysid_root / "pineapple_sysid/collect.py").is_file():
+      p.error("sysid-root must contain pineapple_sysid/collect.py")
+    sys.path.insert(0, str(a.sysid_root.resolve()))
+    from pineapple_sysid.collect import Recorder
+
+    recorder = Recorder(a.record_mcap)
   try:
-    return run(a.seconds, a.observation_hz, a.output, a.gc_mode)
+    return run(
+      a.seconds, a.observation_hz, a.output, a.gc_mode, recorder, a.record_mcap
+    )
   except (RuntimeError, ValueError, OSError) as exc:
     p.exit(1, str(exc) + "\n")
 

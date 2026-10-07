@@ -460,3 +460,28 @@ active. This changes only the diagnostic process, not the robot controller.
 Compare maximum callback delay, observation interval, sequence gaps and GC
 counts against normal mode with identical publisher settings. No rebuild is
 needed for this Python-only change.
+
+### Test the sysid recorder without motor commands
+
+The diagnostic can exercise the actual `pineapple_sysid.collect.Recorder`
+(queue, full LowState JSON serialization, MCAP compression and disk writes).
+It imports only the recorder class; it never creates the collection `DDS`
+transport or any command publisher. In your robot Python environment, install
+`mcap` and `numpy` if missing (`python -m pip install 'mcap>=1.3,<2' numpy`).
+Keep the same motor-free `imu_dds_probe` publisher running as above, choose a
+fresh prefix, and run:
+
+```bash
+python scripts/check_imu_dds.py --seconds 120 --gc-mode disabled \
+  --sysid-root "$HOME/pineapple-v3-sysid-stage" \
+  --record-mcap "${prefix}.mcap" --output "${prefix}.summary.json"
+```
+
+Adjust `--sysid-root` to your checkout containing `pineapple_sysid/collect.py`.
+The summary prints serialization/enqueue duration and queued/read-back message
+counts; recording errors or a read-back count mismatch fail the test. Raw MCAP
+stays on the robot; share only the printed summary. This is diagnostic IMU data
+with placeholder motor fields, not a motor identification dataset. Although
+stored under the recorder's `rt/lowstate` channel, its source is exclusively
+`rt/imu_probe/lowstate`; the summary retains that source and synthetic flag.
+The real command loop, motor feedback and full controller load are not tested.
