@@ -211,12 +211,14 @@ public:
 
 class Motor_Control
 {
+    const bool feedback_only_;
+    void SendFrame(std::vector<uint8_t>& data, uint32_t id);
 using clock = std::chrono::steady_clock;
 using duration = std::chrono::duration<double>;
 
  public:
     Motor_Control(uint32_t nom_baud,uint32_t dat_baud,std::string sn,
-        std::vector<DmActData> *data_ptr);
+        std::vector<DmActData> *data_ptr, bool feedback_only = false);
     ~Motor_Control();
     
     void addMotor(std::shared_ptr<Motor> DM_Motor);

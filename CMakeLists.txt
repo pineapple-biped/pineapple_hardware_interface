@@ -104,3 +104,9 @@ endif()
 # Separate sensor-only publisher: deliberately no motor/CAN library dependency.
 add_executable(imu_dds_probe src/test/imu_dds_probe.cpp)
 target_link_libraries(imu_dds_probe ${XSENS_OBJ_LIBS} unitree_sdk2 pthread)
+
+if(BUILD_TESTING)
+    add_executable(test_feedback_only src/test/test_feedback_only.cpp)
+    target_compile_options(test_feedback_only PRIVATE -UNDEBUG)
+    add_test(NAME feedback_only COMMAND test_feedback_only)
+endif()

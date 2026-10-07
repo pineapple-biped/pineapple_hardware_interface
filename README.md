@@ -493,3 +493,34 @@ older sysid checkouts are rejected with an update instruction. The report now
 prints `callback_enqueue_ms`, `queue_overflows` and
 `serialization_location: writer_thread`. The worker can still contend for the
 Python GIL, so remeasure on the robot rather than assuming all stalls disappear.
+
+### Motor-disabled feedback diagnostic
+
+Stop the normal interface and all command publishers first. With the robot
+rigidly supported, run the same binary with `--feedback-only`:
+
+```bash
+cmake -S . -B build
+cmake --build build -j2
+ctest --test-dir build --output-on-failure
+sudo timeout --signal=INT 8s ./build/pineapple_hardware_interface \
+  --feedback-only ./config/config_v3.yaml 2>&1 | tee motor_feedback.log
+```
+
+This mode skips motor enable and mode switching, starts with the disable latch
+set, periodically sends disable, and polls status. It creates no LowCmd subscriber;
+fault recovery cannot re-enable motors. The motor-send allowlist permits only
+status requests and disable frames, blocking zeroing, parameter writes and
+motion commands. `set_zero: true` is rejected before opening devices. IMU startup
+is skipped. Normal mode behavior is unchanged.
+
+Once per second, the table prints index, CAN ID, raw encoder radians, converted
+joint radians, milliseconds since decoded motor feedback, and raw status code.
+Indices 2 and 6 are the left and right calves with the V3 mapping. A printed
+position with old feedback is not valid evidence of current pose. This is active
+CAN status/disable traffic, not an electrically passive sniffer. Software tests
+cannot guarantee disable reached the physical motor: inspect fresh status first,
+and do not manually manipulate a powered/enabled joint. Keep the robot supported
+and the independent stop available. Timeout exit 124 is expected; SIGINT requests
+normal bridge shutdown. Do not change calibration based only on a gravity-hanging
+pose or wrap published angles independently of the command conversion.

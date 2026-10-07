@@ -1,3 +1,4 @@
+#include "include/feedback_only.h"
 #include "damiao.h"
 
 namespace damiao
@@ -117,8 +118,8 @@ bool Motor::is_have_param(int key) const
 
 /******一个can，一个Motor_Control**********************/
 Motor_Control::Motor_Control(uint32_t nom_baud,uint32_t dat_baud,std::string sn,
-    std::vector<DmActData> *data_ptr)
-    :  data_ptr_(data_ptr)
+    std::vector<DmActData> *data_ptr, bool feedback_only)
+    : feedback_only_(feedback_only), data_ptr_(data_ptr)
 {
     for (auto it = data_ptr_->begin(); it != data_ptr_->end(); ++it) 
     {//遍历该bus下的所有电机
@@ -135,7 +136,8 @@ Motor_Control::Motor_Control(uint32_t nom_baud,uint32_t dat_baud,std::string sn,
    
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
    
-    enable_all();//使能该接口下的所有电机
+    if (feedback_only_) disable_all();
+    else enable_all();
 
     std::cout<<"**********Motor_Control initialization successful**********"<<std::endl<<std::endl;
 }
@@ -239,7 +241,7 @@ float Motor_Control::read_motor_param(Motor &DM_Motor,uint8_t RID)
     uint8_t id_high = (id >> 8) & 0xff;
 
     std::vector<uint8_t> mydata = {id_low, id_high, 0x33, RID, 0x00, 0x00, 0x00, 0x00};
-    usb_hw->fdcanFrameSend(mydata, 0x7FF);
+    SendFrame(mydata, 0x7FF);
     usleep(2000);
     return 0;
 }
@@ -261,7 +263,7 @@ void Motor_Control::save_motor_param(Motor &DM_Motor)
     uint8_t id_high = (id >> 8) & 0xff;
 
     std::vector<uint8_t> mydata = {id_low, id_high, 0xAA, 0x01, 0x00, 0x00, 0x00, 0x00};
-    usb_hw->fdcanFrameSend(mydata, 0x7FF);
+    SendFrame(mydata, 0x7FF);
     usleep(100000);
 }
 
@@ -272,13 +274,13 @@ void Motor_Control::refresh_motor_status(Motor& motor)
     uint8_t id_high = (motor.GetCanId() >> 8) & 0xff; //id high 8 bit
 
     std::vector<uint8_t> mydata = {id_low, id_high, 0xCC, 0x00};
-    usb_hw->fdcanFrameSend(mydata, 0x7FF);
+    SendFrame(mydata, 0x7FF);
 }
 
 void Motor_Control::control_cmd(uint16_t id , uint8_t cmd)
 {
     std::vector<uint8_t> mydata = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, cmd};
-    usb_hw->fdcanFrameSend(mydata, id);
+    SendFrame(mydata, id);
 }
 
 void Motor_Control::write_motor_param(Motor &DM_Motor,uint8_t RID,const uint8_t data[4])
@@ -290,7 +292,7 @@ void Motor_Control::write_motor_param(Motor &DM_Motor,uint8_t RID,const uint8_t 
     uint8_t id_high = (id >> 8) & 0xff;
 
     std::vector<uint8_t> mydata = {id_low, id_high, 0x55, RID, data[0], data[1], data[2], data[3]};
-    usb_hw->fdcanFrameSend(mydata, 0x7FF);
+    SendFrame(mydata, 0x7FF);
 }
 
 void Motor_Control::set_zero_position(Motor &DM_Motor)
@@ -333,7 +335,7 @@ void Motor_Control::control_mit(Motor &DM_Motor, float kp, float kd, float q, fl
     data[7] = tau_uint & 0xff;
     
     std::vector<uint8_t> mydata = {data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]};
-    usb_hw->fdcanFrameSend(mydata, can_id);
+    SendFrame(mydata, can_id);
 }
 
 void Motor_Control::control_pos_vel(Motor &DM_Motor,float pos,float vel)
@@ -361,7 +363,7 @@ void Motor_Control::control_pos_vel(Motor &DM_Motor,float pos,float vel)
     data[7] = *(vbuf+3);
   
     std::vector<uint8_t> mydata = {data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]};
-    usb_hw->fdcanFrameSend(mydata, can_id);
+    SendFrame(mydata, can_id);
 }
 
 void Motor_Control::control_vel(Motor &DM_Motor,float vel)
@@ -384,7 +386,7 @@ void Motor_Control::control_vel(Motor &DM_Motor,float vel)
     data[3] = *(vbuf+3);
 
     std::vector<uint8_t> mydata = {data[0], data[1], data[2], data[3]};
-    usb_hw->fdcanFrameSend(mydata, can_id);
+    SendFrame(mydata, can_id);
 }
    
 
@@ -550,3 +552,9 @@ void Motor_Control::canframeCallback(can_value_type& value)
         
        
 
+
+void damiao::Motor_Control::SendFrame(std::vector<uint8_t>& data, uint32_t id) {
+    if (feedback_only_ && !FeedbackOnlyFrameAllowed(data, id))
+        throw std::runtime_error("feedback-only mode blocked a motor write");
+    usb_hw->fdcanFrameSend(data, id);
+}

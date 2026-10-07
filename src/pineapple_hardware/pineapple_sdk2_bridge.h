@@ -47,9 +47,10 @@ class PineappleSdk2Bridge
 public:
     // Platforms are concatenated: the joint index in LowCmd/LowState follows
     // the order of platform_configs (platform 0 motors first, then platform 1, ...).
-    PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs);
+    PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs, bool feedback_only = false);
     ~PineappleSdk2Bridge();
 
+    void PrintMotorFeedback();
     void LowCmdGoHandler(const void *msg);
     void PublishLowStateGo();
 
@@ -87,6 +88,7 @@ public:
     vector<MotorPosLimit> pos_limit_;
 
     private:
+    const bool feedback_only_;
 
     void HandleMotorFault(int motor_idx);
     void WatchCommands();

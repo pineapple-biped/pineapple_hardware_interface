@@ -3,8 +3,14 @@
 #include <algorithm>
 #include "../imu/configure_xsens.hpp"
 
-PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs)
+PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs, bool feedback_only)
+    : feedback_only_(feedback_only)
 {
+    if (feedback_only_) {
+        for (const auto& cfg : platform_configs)
+            if (cfg.set_zero) throw std::runtime_error("feedback-only requires set_zero: false");
+        command_watchdog_.Trip();
+    }
 
     dm_data_lists_.reserve(platform_configs.size());
 
@@ -22,7 +28,7 @@ PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_con
             ctrl_of_motor_.push_back(ctrl_idx);
         }
         motor_controls_.push_back(std::make_shared<damiao::Motor_Control>(nom_baud,dat_baud,
-          cfg.dev_sn,&dm_data));
+          cfg.dev_sn,&dm_data,feedback_only_));
 
         can_id_list.insert(can_id_list.end(), cfg.can_id_list.begin(), cfg.can_id_list.end());
         mst_id_list.insert(mst_id_list.end(), cfg.mst_id_list.begin(), cfg.mst_id_list.end());
@@ -71,8 +77,10 @@ PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_con
     init_time_ = std::chrono::steady_clock::now();
     last_poll_time_ = init_time_;
     command_watchdog_thread_ = std::thread(&PineappleSdk2Bridge::WatchCommands, this);
+    if (!feedback_only_) {
     low_cmd_go_suber_.reset(new ChannelSubscriber<unitree_go::msg::dds_::LowCmd_>(TOPIC_LOWCMD));
     low_cmd_go_suber_->InitChannel(bind(&PineappleSdk2Bridge::LowCmdGoHandler, this, placeholders::_1), 1);
+    }
 
 
     lowStatePuberThreadPtr = CreateRecurrentThreadEx("lowstate", UT_CPU_ID_NONE, 2000, &PineappleSdk2Bridge::PublishLowStateGo, this);
@@ -358,5 +366,19 @@ void PineappleSdk2Bridge::WatchCommands()
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+}
+
+void PineappleSdk2Bridge::PrintMotorFeedback() {
+    if (!feedback_only_) return;
+    std::lock_guard<std::mutex> lock(motor_command_mutex_);
+    std::cout << "[feedback-only] index CAN raw_rad joint_rad age_ms status" << std::endl;
+    for (int i = 0; i < num_motor_; ++i) {
+        auto m = CtrlOf(i)->getMotor(can_id_list[i]);
+        const double raw = m->Get_Position();
+        std::cout << i << " 0x" << std::hex << can_id_list[i] << std::dec
+                  << " " << raw << " " << (raw - motor_offset[i]) * direction[i]
+                  << " " << m->GetTimeSinceLastFeedback() * 1000
+                  << " " << static_cast<int>(m->Get_ERR()) << std::endl;
     }
 }

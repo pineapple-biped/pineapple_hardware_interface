@@ -113,12 +113,16 @@ int main(int argc, char **argv)
     // Each config file describes one platform on its own USB2CANFD device.
     // Joint index order in LowCmd/LowState follows the argument order
     // (e.g. wheel biped config first -> joints 0-7, arm config second -> joints 8-13).
+    bool feedback_only = false;
     std::vector<std::string> config_paths;
     if (argc > 1)
     {
-        for (int i = 1; i < argc; i++) config_paths.push_back(argv[i]);
+        for (int i = 1; i < argc; i++) {
+            if (std::string(argv[i]) == "--feedback-only") feedback_only = true;
+            else config_paths.push_back(argv[i]);
+        }
     }
-    else
+    if (config_paths.empty())
     {
         config_paths.push_back("../config/config.yaml");
     }
@@ -132,6 +136,11 @@ int main(int argc, char **argv)
         {
             return 1;
         }
+        if (feedback_only && motor_config.set_zero) {
+            std::cerr << "feedback-only requires set_zero: false; no devices opened" << std::endl;
+            return 1;
+        }
+        if (feedback_only) motor_config.have_imu = false;
         size_t n = motor_config.can_id_list.size();
         std::cout << "Platform " << platform_configs.size() << ": " << path
                   << ", joints " << joint_base << "-" << (joint_base + n - 1)
@@ -148,11 +157,15 @@ int main(int argc, char **argv)
 
     // Main function
     ChannelFactory::Instance()->Init(config.domain_id, config.interface);
-    PineappleSdk2Bridge pineapple_interface(platform_configs);
+    if (feedback_only)
+        std::cout << "FEEDBACK ONLY: repeated disable + status requests; no enable, zeroing, "
+                     "parameter writes or command subscriber. IMU skipped." << std::endl;
+    PineappleSdk2Bridge pineapple_interface(platform_configs, feedback_only);
 
     while (running)
     {
-        sleep(2);
+        if (feedback_only) pineapple_interface.PrintMotorFeedback();
+        sleep(1);
     }
 
     return 0;
