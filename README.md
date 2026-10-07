@@ -302,3 +302,20 @@ Upload all five files regardless of PASS/FAIL. Exit 124 from the USB timeout is
 expected. Check that usbmon output is nonempty and its error log is empty.
 Compare sample rate, tail gaps, packet continuity, and clock-offset variation;
 a lower output rate alone does not establish lower absolute sensor latency.
+
+### Controlled 250 Hz comparison
+
+Use `PINEAPPLE_IMU_PROFILE=fast250` for orientation 100 Hz and gyro/acceleration
+250 Hz, retaining 2 Mbaud, the 1 ms USB latency timer, and 1 ms SDK polling.
+Rebuild with `cmake --build build -j2` and run CTest after pulling the profile.
+Use the preceding simultaneous capture block with `fast500` replaced by
+`fast250` and the output prefix `usb500_` replaced by `usb250_`. All five files
+are needed. The probe remains motor-free; stop the controller and hardware
+interface before capture.
+
+At 250 Hz, the nominal gyro/acceleration interval is 4 ms. The existing 5 ms
+host-gap criterion is deliberately unchanged, leaving only 1 ms of margin.
+Assess excess gap above the nominal interval and delivery variation alongside
+PASS/FAIL; lowering output rate does not necessarily improve sample freshness.
+The SDK verifies the requested output-rate readback and fails if unsupported.
+Existing profiles and the default are unchanged.

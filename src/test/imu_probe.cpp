@@ -31,7 +31,7 @@ int main(int argc, char** argv)
             else if (arg == "--trace" && i+1 < argc) trace_output = argv[++i];
             else if (arg == "--help") {
                 std::cout << "Usage: imu_probe --measure [--seconds 1..120] [--record NEW.csv] [--trace NEW.trace.csv]\n"
-                          << "PINEAPPLE_IMU_PROFILE=baseline, fast or fast500. IMU only; no CAN, DDS or motors.\n"
+                          << "PINEAPPLE_IMU_PROFILE=baseline, fast, fast500 or fast250. IMU only; no CAN, DDS or motors.\n"
                           << "Stop the hardware interface first. Recording begins after warmup.\n";
                 return 0;
             } else throw std::invalid_argument("Unknown/missing argument: " + arg);

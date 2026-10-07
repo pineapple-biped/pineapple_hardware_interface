@@ -47,6 +47,16 @@ int main()
     assert(pineapplePollWaitMs(0, true) == 1);
     assert(pineapplePollWaitMs(256, false) == 0);
     assert(pineapplePollWaitMs(256, true) == 0);
+    const auto fast250 = imuOutputProfile("fast250");
+    assert(fast250.hz[0] == 100 && fast250.hz[1] == 250 && fast250.hz[2] == 250);
+    assert(fast250.minimum_baud == 2000000);
+    assert(fast250.max_gap_ms[0] == 20 && fast250.max_gap_ms[1] == 5
+           && fast250.max_gap_ms[2] == 5);
+    assert(imuDeliveryWindowHealthy(fast250, 1, 250, 4, 4.9));
+    assert(!imuDeliveryWindowHealthy(fast250, 1, 500, 2, 4));
+    assert(!imuDeliveryWindowHealthy(fast250, 2, 250, 4, 5));
+    assert(imuProfileSupportsBaud(fast250, XsBaud::numericToRate(2000000)));
+    assert(!imuProfileSupportsBaud(fast250, XsBaud::numericToRate(115200)));
     const auto fast500 = imuOutputProfile("fast500");
     assert(fast500.hz[0] == 100 && fast500.hz[1] == 500 && fast500.hz[2] == 500);
     assert(fast500.minimum_baud == 2000000);
