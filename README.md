@@ -319,3 +319,27 @@ Assess excess gap above the nominal interval and delivery variation alongside
 PASS/FAIL; lowering output rate does not necessarily improve sample freshness.
 The SDK verifies the requested output-rate readback and fails if unsupported.
 Existing profiles and the default are unchanged.
+
+### Analyze recordings on the robot instead of uploading raw files
+
+The offline summarizer uses only the Python standard library (works in the
+robot's `rl` conda environment; no uv, NumPy, or plotting packages needed).
+It opens recorded files only, never the IMU, CAN, DDS, or motors. Run it after
+the probe and USB capture finish. Supply the filename prefix without an
+extension; for example, using the capture shell's existing `prefix` variable:
+
+```bash
+python scripts/summarize_imu_recording.py --latest imu_recordings
+```
+
+Or supply an explicit path such as `imu_recordings/usb250_YYYYMMDD_HHMMSS`.
+The script prints a short report to paste into chat and writes
+`<prefix>.summary.json` with source hashes, field rates, gap percentiles,
+ten worst sensor gaps, packet integrity, SDK stage durations, and per-endpoint
+USB statistics. The JSON is small; raw files can stay on the robot. Re-running
+replaces only that derived summary, never the recordings.
+
+Missing optional files or count mismatches are reported. Malformed sensor or
+trace rows fail the audit. USB text capture can itself omit events, so apparent
+USB gaps are not automatically physical delays. Summaries support routine
+comparisons; unusual failures may still require a targeted raw excerpt later.
