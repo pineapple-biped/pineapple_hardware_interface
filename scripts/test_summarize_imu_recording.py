@@ -3,7 +3,7 @@
 import tempfile
 from pathlib import Path
 
-from summarize_imu_recording import audit, percentile
+from summarize_imu_recording import audit, pair_serial_reads, percentile
 
 
 def test_integrity_and_thresholds():
@@ -39,7 +39,20 @@ def test_percentile():
   assert percentile([7], 99) == 7
 
 
+def test_read_capture_edges():
+  dt, partial = pair_serial_reads([2, 4, 6], [1, 3, 5])
+  assert dt == [1000, 1000] and partial == 2
+  assert pair_serial_reads([1, 3], [2, 4]) == ([1000, 1000], 0)
+  try:
+    pair_serial_reads([1, 2], [3, 4])
+  except ValueError:
+    pass
+  else:
+    raise AssertionError("Ambiguous interior pairs must not be accepted")
+
+
 if __name__ == "__main__":
+  test_read_capture_edges()
   test_integrity_and_thresholds()
   test_percentile()
   print("Offline summarizer tests passed")

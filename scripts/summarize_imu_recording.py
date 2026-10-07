@@ -30,6 +30,23 @@ def describe(values):
   }
 
 
+def pair_serial_reads(starts, ends):
+  """Discard only capture-edge partial reads; reject ambiguous internal pairs."""
+  starts, ends = sorted(starts), sorted(ends)
+  leading = sum(t < starts[0] for t in ends) if starts else len(ends)
+  trailing = sum(t > ends[-1] for t in starts) if ends else len(starts)
+  ends = ends[leading:]
+  if trailing:
+    starts = starts[:-trailing]
+  if len(starts) != len(ends):
+    raise ValueError("Unpaired internal read events")
+  if any(b < a for a, b in zip(starts, ends)):
+    raise ValueError("Negative internal read duration")
+  if any(b > a for b, a in zip(ends, starts[1:])):
+    raise ValueError("Overlapping serial read pairs")
+  return [(b - a) * 1000 for a, b in zip(starts, ends)], leading + trailing
+
+
 def audit(prefix):
   prefix = Path(prefix)
   files = {
@@ -142,6 +159,7 @@ def audit(prefix):
       "events": sum(counts.values()),
       "stage_counts": dict(counts),
       "stages_ms": {},
+      "partial_read_events_at_capture_edges": 0,
     }
     tm = re.search(r"\[trace\] events=(\d+) dropped=(\d+)", log)
     trace["dropped"] = int(tm[2]) if tm else None
@@ -159,6 +177,15 @@ def audit(prefix):
         if stage != a:
           continue
         aa, bb = sorted(groups[(a, source)]), sorted(groups[(b, source)])
+        if a == "read_begin":
+          try:
+            dt, partial = pair_serial_reads(aa, bb)
+          except ValueError as exc:
+            warnings.append(str(exc))
+            continue
+          trace["partial_read_events_at_capture_edges"] += partial
+          deltas.extend(dt)
+          continue
         if len(aa) != len(bb):
           warnings.append("Unpaired trace stage: " + a)
           continue
@@ -206,6 +233,10 @@ def audit(prefix):
         "coverage_relative_s": [events[0][0] - first, events[-1][0] - first],
         "caution": "USB trace omissions can mimic gaps; this is not absolute latency.",
       }
+    if not result["usb"]["endpoints"]:
+      warnings.append(
+        "No usable USB bulk-IN data in capture; USB-level comparison unavailable"
+      )
   if files[".usbmon.log"].exists() and files[".usbmon.log"].stat().st_size:
     warnings.append("USB capture error log is nonempty; inspect it")
   return result
@@ -276,6 +307,10 @@ def main():
   print("CPU % of one core:", result["cpu_mean_percent_one_core"])
   if "trace" in result:
     print("Trace events/drops:", result["trace"]["events"], result["trace"]["dropped"])
+    print(
+      "Partial read events at capture edges:",
+      result["trace"]["partial_read_events_at_capture_edges"],
+    )
   for endpoint, v in result.get("usb", {}).get("endpoints", {}).items():
     print(
       "USB",
