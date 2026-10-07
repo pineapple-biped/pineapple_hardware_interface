@@ -485,3 +485,11 @@ with placeholder motor fields, not a motor identification dataset. Although
 stored under the recorder's `rt/lowstate` channel, its source is exclusively
 `rt/imu_probe/lowstate`; the summary retains that source and synthetic flag.
 The real command loop, motor feedback and full controller load are not tested.
+
+With the updated sysid recorder, the receive callback retains the fresh DDS
+sample and enqueues it outside the observation snapshot lock. Dataclass/JSON
+conversion runs on the recorder's worker thread. Update **both** repositories;
+older sysid checkouts are rejected with an update instruction. The report now
+prints `callback_enqueue_ms`, `queue_overflows` and
+`serialization_location: writer_thread`. The worker can still contend for the
+Python GIL, so remeasure on the robot rather than assuming all stalls disappear.

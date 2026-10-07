@@ -3,7 +3,6 @@
 
 # ruff: noqa: B905 -- support robot Python versions older than 3.10
 import argparse
-import dataclasses
 import gc
 import json
 import math
@@ -75,7 +74,7 @@ def run(seconds, hz, output, gc_mode="normal", recorder=None, record_path=None):
   recording = False
   recorded = 0
   recording_errors = []
-  serialization_ms = []
+  enqueue_ms = []
   gc_starts = {}
   gc_pauses = []
 
@@ -98,18 +97,20 @@ def run(seconds, hz, output, gc_mode="normal", recorder=None, record_path=None):
           errors.append(str(exc))
       return
     with lock:
-      if accepting:
-        latest = sample
-        rows.append(sample)
-        if recording and recorder is not None:
-          started = time.monotonic()
-          try:
-            # Same serialization and bounded writer queue as sysid collection.
-            recorder.add("rt/lowstate", int(now * 1e9), dataclasses.asdict(message))
-            recorded += 1
-          except Exception as exc:
-            recording_errors.append(str(exc))
-          serialization_ms.append((time.monotonic() - started) * 1000)
+      if not accepting:
+        return
+      latest = sample
+      rows.append(sample)
+      should_record = recording and recorder is not None
+    if should_record:
+      started = time.monotonic()
+      try:
+        # Retain this fresh DDS sample; no mutation or serialization here.
+        recorder.add_owned_message("rt/lowstate", int(now * 1e9), message)
+        recorded += 1
+      except Exception as exc:
+        recording_errors.append(str(exc))
+      enqueue_ms.append((time.monotonic() - started) * 1000)
 
   sub = ChannelSubscriber("rt/imu_probe/lowstate", LowState_)
   sub.Init(callback, 10)  # Same queue length as deployment subscriber.
@@ -200,7 +201,9 @@ def run(seconds, hz, output, gc_mode="normal", recorder=None, record_path=None):
         path=str(record_path),
         queued=recorded,
         replayed=replayed,
-        serialization_enqueue_ms=describe(serialization_ms),
+        callback_enqueue_ms=describe(enqueue_ms),
+        queue_overflows=recorder.overflow_count,
+        serialization_location="writer_thread",
       )
       if recorder is not None
       else None
@@ -317,6 +320,8 @@ def main():
     sys.path.insert(0, str(a.sysid_root.resolve()))
     from pineapple_sysid.collect import Recorder
 
+    if not hasattr(Recorder, "add_owned_message"):
+      p.error("Update the sysid checkout: git -C YOUR_SYSID_ROOT pull --ff-only")
     recorder = Recorder(a.record_mcap)
   try:
     return run(
