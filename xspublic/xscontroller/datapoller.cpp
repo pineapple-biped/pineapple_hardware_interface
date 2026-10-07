@@ -66,6 +66,7 @@
 #include "datapoller.h"
 #include "dataparser.h"
 #include "pineapple_poll_wait.h"
+#include "pineapple_readiness.h"
 
 /*! \brief Create a DataPoller with a \a parser */
 
@@ -119,15 +120,16 @@ void DataPoller::cleanup()
 int32_t DataPoller::innerFunction(void)
 {
 	XsByteArray ba;
+	pineappleReadinessApplied() = false;
 	pineappleDeliveryTrace().emit("read_begin", &m_parser, 0);
 	const XsResultValue result = m_parser.readDataToBuffer(ba);
 	pineappleDeliveryTrace().emit("read_end", &m_parser, ba.size());
 	if (result != XRV_OK) {
 		pineappleDeliveryTrace().emit("read_error", &m_parser, result);
-		return 1;
+		return pineappleReadinessApplied() && result == XRV_TIMEOUT ? 0 : 1;
 	}
 
-	int32_t retval = conjureUpWaitTime(ba);
+	int32_t retval = pineappleReadinessApplied() ? 0 : conjureUpWaitTime(ba);
 	if (ba.size())
 		m_parser.addRawData(ba);
 

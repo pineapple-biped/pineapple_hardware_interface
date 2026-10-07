@@ -6,6 +6,7 @@
 #include <memory>
 #include <sys/resource.h>
 #include <xscontroller/pineapple_poll_wait.h>
+#include <xscontroller/pineapple_readiness.h>
 #include "../imu/record_imu.hpp"
 #include <string>
 Journaller* gJournal = nullptr;
@@ -59,6 +60,8 @@ int main(int argc, char** argv)
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 2; }
     std::cout << "[imu] SDK small-read wait=" << (pineappleLowLatencyPoll() ? 1 : 2)
               << " ms (rebuild Xsens libraries for the opt-in override)\n";
+    std::cout << "[imu] readiness mode=" << (pineappleReadinessEnabled() ? "requested" : "off")
+              << " (POSIX serial: wait up to 10 ms, wake on bytes; rebuild SDK)\n";
     XsControl* control = XsControl::construct();
     if (!control) return 1;
     XsPortInfo port;

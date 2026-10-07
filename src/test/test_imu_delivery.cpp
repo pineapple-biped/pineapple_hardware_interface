@@ -3,6 +3,8 @@
 #include "../imu/record_imu.hpp"
 #include <atomic>
 #include <xscontroller/pineapple_poll_wait.h>
+#include <xscontroller/pineapple_readiness.h>
+#include <unistd.h>
 #include <cassert>
 #include <thread>
 
@@ -47,6 +49,26 @@ int main()
     assert(pineapplePollWaitMs(0, true) == 1);
     assert(pineapplePollWaitMs(256, false) == 0);
     assert(pineapplePollWaitMs(256, true) == 0);
+    assert(pineappleReadinessTimeout(0, true) == 10);
+    assert(pineappleReadinessTimeout(0, false) == 0);
+    assert(pineappleReadinessTimeout(25, true) == 25);
+    int pipefd[2]; assert(pipe(pipefd) == 0);
+    assert(pineappleSelectReadable(pipefd[0], 0) == 0);
+    assert(pineappleSelectReadable(pipefd[0], 2) == 0);
+    std::thread arrival([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        assert(write(pipefd[1], "x", 1) == 1);
+    });
+    assert(pineappleSelectReadable(pipefd[0], 1000) > 0);
+    arrival.join();
+    char byte; assert(read(pipefd[0], &byte, 1) == 1 && byte == 'x');
+    close(pipefd[0]); close(pipefd[1]);
+    assert(pineappleSelectReadable(-1, 0) == -1);
+    pineappleReadinessApplied() = true;
+    std::thread isolated([] { assert(!pineappleReadinessApplied()); });
+    isolated.join();
+    assert(pineappleReadinessApplied());
+    pineappleReadinessApplied() = false;
     const auto fast250 = imuOutputProfile("fast250");
     assert(fast250.hz[0] == 100 && fast250.hz[1] == 250 && fast250.hz[2] == 250);
     assert(fast250.minimum_baud == 2000000);

@@ -58,6 +58,8 @@ def audit(prefix):
     if "FAIL: host delivery" in log
     else "UNKNOWN"
   )
+  mode = re.search(r"\[imu\] readiness mode=(\w+)", log)
+  result["readiness_mode"] = mode[1] if mode else "not logged (older probe)"
   result["configured_hz"] = dict(
     re.findall(r"output_id=(\d+) configured_hz=(\d+)", log)
   )
@@ -236,6 +238,7 @@ def main():
   report = Path(str(args.prefix) + ".summary.json")
   report.write_text(json.dumps(result, indent=2) + "\n")
   print("IMU SUMMARY:", result["recording"])
+  print("Readiness mode:", result["readiness_mode"])
   print(
     "Probe:",
     result["probe_result"],

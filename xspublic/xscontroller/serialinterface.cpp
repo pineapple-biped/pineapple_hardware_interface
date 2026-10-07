@@ -62,6 +62,7 @@
 //  ARBITRATORS APPOINTED IN ACCORDANCE WITH SAID RULES.
 //  
 
+#include "pineapple_readiness.h"
 #include "serialinterface.h"
 #include <xstypes/xsportinfo.h>
 #include <xstypes/xscontrolline.h>
@@ -596,25 +597,17 @@ XsResultValue SerialInterface::readData(XsFilePos maxLength, XsByteArray& data)
 	if (length == 0)
 		return (m_lastResult = XRV_TIMEOUT);
 #else
-	fd_set fd;
-	fd_set err;
-	timeval timeout;
-	FD_ZERO(&fd);
-	FD_ZERO(&err);
-	FD_SET(m_handle, &fd);
-	FD_SET(m_handle, &err);
-
-	timeout.tv_sec = m_timeout / 1000;
-	timeout.tv_usec = (m_timeout - (timeout.tv_sec * 1000)) * 1000;
-
-	int res = select(FD_SETSIZE, &fd, NULL, &err, &timeout);
-	if (res < 0 || FD_ISSET(m_handle, &err))
+	const bool readiness = pineappleReadinessEnabled() && m_timeout == 0;
+	const uint32_t waitMs = pineappleReadinessTimeout(m_timeout, readiness);
+	int res = pineappleSelectReadable(m_handle, waitMs);
+	if (res < 0)
 	{
 		data.clear();
 		return (m_lastResult = XRV_ERROR);
 	}
 	else if (res == 0)
 	{
+		pineappleReadinessApplied() = readiness;
 		data.clear();
 		return (m_lastResult = XRV_TIMEOUT);
 	}
@@ -622,7 +615,10 @@ XsResultValue SerialInterface::readData(XsFilePos maxLength, XsByteArray& data)
 	data.setSize(maxLength);
 	int length = read(m_handle, (void*)data.data(), maxLength);
 	if (length > 0)
+	{
+		pineappleReadinessApplied() = readiness;
 		data.pop_back(maxLength - length);
+	}
 	else
 	{
 		int err = errno;

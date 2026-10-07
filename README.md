@@ -343,3 +343,39 @@ Missing optional files or count mismatches are reported. Malformed sensor or
 trace rows fail the audit. USB text capture can itself omit events, so apparent
 USB gaps are not automatically physical delays. Summaries support routine
 comparisons; unusual failures may still require a targeted raw excerpt later.
+
+### Readiness-based serial test at 500 Hz
+
+`PINEAPPLE_XSENS_READINESS=1` opts into a POSIX serial reader that waits for
+readability instead of polling an empty port and then sleeping. The wait is
+bounded at 10 ms and returns as soon as bytes are available; 10 ms is not an
+added sample delay. Successful readiness reads skip the poller's extra sleep.
+Timeouts re-enter the bounded wait; errors retain a sleep to avoid spinning.
+Other transports, explicit nonzero serial timeouts, and the default mode retain
+previous behavior. This does not change USB transfer sizes or sensor filtering.
+
+Rebuild **both the SDK and the application** before this test:
+
+```bash
+make -C xspublic clean && make -C xspublic -j2 &&
+  cmake --build build -j2 && ctest --test-dir build --output-on-failure
+```
+
+Use the previous simultaneous USB/IMU capture block, naming the prefix
+`ready500_${stamp}` and setting these three environment variables on `imu_probe`:
+
+```bash
+sudo env PINEAPPLE_IMU_PROFILE=fast500 PINEAPPLE_XSENS_LOW_LATENCY=1 \
+  PINEAPPLE_XSENS_READINESS=1 \
+  ./build/imu_probe --measure --seconds 120 \
+  --record "${prefix}.csv" --trace "${prefix}.trace.csv" \
+  > "${prefix}.log" 2>&1
+```
+
+Keep the robot supported and stationary, with the controller/hardware interface
+stopped. The probe remains motor-free. After both captures finish, run the
+robot-side summarizer and paste its output; no raw upload is normally needed.
+In readiness mode `read_begin` to `read_end` includes the intentional wait for
+new data, so a longer read duration alone is not evidence of a processing stall.
+Compare arrival gaps and CPU against `fast500` with readiness unset. Physical
+improvement must be established by that measurement, not by the offline tests.
