@@ -9,6 +9,7 @@ import math
 import struct
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from summarize_imu_recording import describe
@@ -41,7 +42,23 @@ def gc_overlap_ms(start, end, pauses):
   return sum(max(0.0, min(end, b) - max(start, a)) * 1000 for a, b, _ in pauses)
 
 
-def run(seconds, hz, output):
+@contextmanager
+def measurement_gc(mode):
+  """Temporarily suppress automatic cyclic GC; reference counting stays active."""
+  enabled = gc.isenabled()
+  try:
+    if mode == "disabled":
+      gc.collect()  # Outside the measured window.
+      gc.disable()
+    yield
+  finally:
+    if enabled:
+      gc.enable()
+    else:
+      gc.disable()
+
+
+def run(seconds, hz, output, gc_mode="normal"):
   # Importing these initializes no command publisher. Only a subscriber is created.
   from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
   from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
@@ -88,22 +105,27 @@ def run(seconds, hz, output):
       time.sleep(0.01)
     if latest is None:
       raise RuntimeError("No valid diagnostic data after 30 s: " + str(errors[:3]))
-    with lock:
-      rows.clear()
-      errors.clear()
-    begin = time.monotonic()
-    next_tick = begin
-    while time.monotonic() - begin < seconds:
+    with measurement_gc(gc_mode):
+      if gc_mode == "disabled":
+        # Drain messages queued during the pre-measurement collection.
+        time.sleep(0.1)
       with lock:
-        sample = latest
-      now = time.monotonic()
-      # Construct the IMU portion of an observation from a coherent snapshot.
-      obs = sample[4] + sample[5]
-      if not all(math.isfinite(v) for v in obs):
-        raise RuntimeError("Invalid observation")
-      observations.append((now, sample))
-      next_tick += 1 / hz
-      time.sleep(max(0, next_tick - time.monotonic()))
+        rows.clear()
+        errors.clear()
+      begin = time.monotonic()
+      next_tick = begin
+      while time.monotonic() - begin < seconds:
+        with lock:
+          sample = latest
+        now = time.monotonic()
+        # Construct the IMU portion of an observation from a coherent snapshot.
+        obs = sample[4] + sample[5]
+        if not all(math.isfinite(v) for v in obs):
+          raise RuntimeError("Invalid observation")
+        observations.append((now, sample))
+        next_tick += 1 / hz
+        time.sleep(max(0, next_tick - time.monotonic()))
+      end = time.monotonic()
   finally:
     gc.callbacks.remove(gc_event)
     with lock:
@@ -119,6 +141,8 @@ def run(seconds, hz, output):
     same_host_loopback=True,
     synthetic=any(r[6] for r in rows),
     duration_s=seconds,
+    gc_mode=gc_mode,
+    gc_enabled_after_measurement=gc.isenabled(),
     observation_hz=hz,
     dds_samples=len(rows),
     observation_samples=len(observations),
@@ -144,7 +168,7 @@ def run(seconds, hz, output):
         [(t - r[2][i]) * 1000 for t, r in observations]
       ),
     )
-  measured_pauses = [(a, b, g) for a, b, g in gc_pauses if b >= begin]
+  measured_pauses = [(a, b, g) for a, b, g in gc_pauses if b >= begin and a <= end]
   result["gc_pause_ms"] = describe([(b - a) * 1000 for a, b, _ in measured_pauses])
   result["gc_events"] = len(measured_pauses)
   result["worst_callback_delays"] = [
@@ -196,6 +220,7 @@ def run(seconds, hz, output):
       "SDK receipt to observation age ms:",
       v["sdk_callback_to_observation_age_ms"],
     )
+  print("GC mode:", gc_mode)
   print("GC events / pause ms:", result["gc_events"], result["gc_pause_ms"])
   print("Worst callback delays:", result["worst_callback_delays"])
   print("Worst observation intervals:", result["worst_observation_intervals"])
@@ -206,6 +231,12 @@ def run(seconds, hz, output):
 
 def main():
   p = argparse.ArgumentParser(description=__doc__)
+  p.add_argument(
+    "--gc-mode",
+    choices=("normal", "disabled"),
+    default="normal",
+    help="Disable automatic cyclic GC only during the bounded measurement",
+  )
   p.add_argument("--seconds", type=int, default=120)
   p.add_argument("--observation-hz", type=float, default=50)
   p.add_argument("--output", type=Path, required=True)
@@ -217,7 +248,7 @@ def main():
   if not a.output.parent.is_dir():
     p.error("Output directory does not exist")
   try:
-    return run(a.seconds, a.observation_hz, a.output)
+    return run(a.seconds, a.observation_hz, a.output, a.gc_mode)
   except (RuntimeError, ValueError, OSError) as exc:
     p.exit(1, str(exc) + "\n")
 

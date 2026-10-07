@@ -443,3 +443,20 @@ intervals. This does not disable GC or change scheduling. A rare delay in this
 allocating diagnostic can be caused by its own recording workload; do not
 attribute it to the production controller without evidence. Correlated events
 support a hypothesis but are not by themselves proof of causality.
+
+To test whether those spikes come from cyclic GC, repeat the same motor-free
+publisher/receiver test with a new output prefix and add `--gc-mode disabled`
+to the receiver command:
+
+```bash
+python scripts/check_imu_dds.py --seconds 120 --gc-mode disabled \
+  --output "${prefix}.summary.json"
+```
+
+The default is `--gc-mode normal`. Disabled mode collects before measurement,
+suppresses automatic cyclic GC only for the bounded measurement, and restores
+its previous state even on interruption or error. Reference counting remains
+active. This changes only the diagnostic process, not the robot controller.
+Compare maximum callback delay, observation interval, sequence gaps and GC
+counts against normal mode with identical publisher settings. No rebuild is
+needed for this Python-only change.

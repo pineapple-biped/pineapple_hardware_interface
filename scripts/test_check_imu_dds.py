@@ -1,10 +1,11 @@
 """Metadata and observation checks; no DDS or hardware initialization."""
 
+import gc
 import math
 import struct
 from types import SimpleNamespace
 
-from check_imu_dds import decode, gc_overlap_ms
+from check_imu_dds import decode, gc_overlap_ms, measurement_gc
 
 
 def message(magic=b"IMD1", published=10.0, quat=(1.0, 0.0, 0.0, 0.0)):
@@ -34,8 +35,26 @@ def test_decode():
       raise AssertionError("Bad metadata or quaternion was accepted")
 
 
+def test_gc_restoration():
+  original = gc.isenabled()
+  try:
+    for enabled in (True, False):
+      (gc.enable if enabled else gc.disable)()
+      for mode in ("normal", "disabled"):
+        try:
+          with measurement_gc(mode):
+            assert gc.isenabled() == (enabled and mode == "normal")
+            raise RuntimeError("Simulated interrupted measurement")
+        except RuntimeError:
+          pass
+        assert gc.isenabled() == enabled
+  finally:
+    (gc.enable if original else gc.disable)()
+
+
 if __name__ == "__main__":
   test_decode()
+  test_gc_restoration()
   assert gc_overlap_ms(1, 2, [(1.5, 2.5, 2)]) == 500
   assert gc_overlap_ms(1, 2, [(3, 4, 0)]) == 0
   print("DDS diagnostic decode tests passed")
