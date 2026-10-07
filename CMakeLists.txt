@@ -100,3 +100,7 @@ if(BUILD_TESTING)
     target_compile_options(test_command_watchdog PRIVATE -UNDEBUG)
     add_test(NAME command_watchdog COMMAND test_command_watchdog)
 endif()
+
+# Separate sensor-only publisher: deliberately no motor/CAN library dependency.
+add_executable(imu_dds_probe src/test/imu_dds_probe.cpp)
+target_link_libraries(imu_dds_probe ${XSENS_OBJ_LIBS} unitree_sdk2 pthread)

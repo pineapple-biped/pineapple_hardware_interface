@@ -379,3 +379,60 @@ In readiness mode `read_begin` to `read_end` includes the intentional wait for
 new data, so a longer read duration alone is not evidence of a processing stall.
 Compare arrival gaps and CPU against `fast500` with readiness unset. Physical
 improvement must be established by that measurement, not by the offline tests.
+
+### Sensor-only DDS and observation-age test
+
+Do **not** use the normal hardware bridge for a motor-free test: its state
+publisher polls motors, and the deployment controller initializes a LowCmd
+publisher. Instead use the separate `imu_dds_probe` and `check_imu_dds.py` below.
+The executable is not linked to the motor/CAN library. It only opens Xsens and
+publishes diagnostic `LowState` on **`rt/imu_probe/lowstate`**, never the normal
+`rt/lowstate` or any command topic. The Python process only subscribes.
+
+Both processes run on the **same robot**, DDS domain 0, loopback `lo`, sharing
+the Linux monotonic clock. The diagnostic message uses its otherwise unused
+40-byte wireless-remote field for a signature, sequence and host timestamps;
+it is incompatible with normal LowState consumers and must remain on the
+diagnostic topic. Quaternion is wxyz and gyro is unfiltered, matching the
+current deployment settings. Subscriber queue length is 10, publication is
+500 Hz, and observation consumption is 50 Hz (matching `mjlab_v3_opt.yaml`
+`simulation_dt=0.005`, `control_decimation=4`).
+
+This measures an **isolated observation proxy**, not the complete controller:
+it copies gyro and computes projected gravity with the deployment formula,
+but does not run policy inference, state estimation, motor traffic, or control.
+A passing result cannot validate those loads. Ages start at the SDK callback;
+absolute sensor/filter latency is still unmeasured. Same-host execution is
+required; do not run the receiver on a laptop.
+
+After pulling `fix/imu-rate-profiles`, build (the readiness SDK from the previous
+step must already be built), stop the controller/hardware interface/other IMU
+probes, and use the robot's `rl` environment for Python DDS dependencies:
+
+```bash
+cmake -S . -B build && cmake --build build -j2 &&
+  ctest --test-dir build --output-on-failure
+conda activate rl
+mkdir -p imu_recordings
+stamp=$(date +%Y%m%d_%H%M%S)
+prefix="imu_recordings/dds500_${stamp}"
+sudo -v
+sudo env PINEAPPLE_IMU_PROFILE=fast500 PINEAPPLE_XSENS_LOW_LATENCY=1 \
+  PINEAPPLE_XSENS_READINESS=1 \
+  ./build/imu_dds_probe --seconds 130 > "${prefix}.publisher.log" 2>&1 &
+imu_publisher_pid=$!
+python scripts/check_imu_dds.py --seconds 120 --output "${prefix}.summary.json"
+wait "$imu_publisher_pid"
+tail -n 3 "${prefix}.publisher.log"
+```
+
+Keep the robot supported and stationary. Paste the receiver summary and last
+publisher lines. Output JSON must be a new path; raw files need not be uploaded.
+A loopback multicast warning can occur even when unicast discovery succeeds.
+If the receiver times out, inspect the publisher log; do not start the normal
+controller as a workaround. The publisher exits after its time limit.
+
+For development, `imu_dds_probe --synthetic` skips all device scanning/opening
+and publishes synthetic IMU samples. A local 5-second synthetic check received
+2500 DDS messages and consumed 250 observations without sequence loss. This
+checks software wiring only; its timing is not evidence of robot performance.
