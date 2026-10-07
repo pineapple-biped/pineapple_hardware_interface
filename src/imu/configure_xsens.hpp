@@ -7,7 +7,8 @@
 #include "output_profile.hpp"
 
 // Same explicit profile is used by the probe and full hardware interface.
-inline bool configureXsens(XsDevice& device, const ImuOutputProfile& profile, XsBaudRate rate)
+inline bool configureXsens(XsDevice& device, const ImuOutputProfile& profile, XsBaudRate rate,
+                           bool verbose = true)
 {
     const int baud = XsBaud::rateToNumeric(rate);
     if (!imuProfileSupportsBaud(profile, rate)) {
@@ -36,7 +37,7 @@ inline bool configureXsens(XsDevice& device, const ImuOutputProfile& profile, Xs
         for (const auto& item : readback)
             if ((item.m_dataIdentifier & XDI_FullTypeMask) == id)
                 rate = item.m_frequency;
-        std::cout << "[imu] output_id=" << static_cast<unsigned>(id)
+        if (verbose) std::cout << "[imu] output_id=" << static_cast<unsigned>(id)
                   << " configured_hz=" << rate << '\n';
         if (rate != profile.hz[i]) {
             std::cerr << "[imu] Refusing unexpected configured IMU rate.\n";

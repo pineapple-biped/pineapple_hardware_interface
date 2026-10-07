@@ -38,6 +38,23 @@ DDS hardware interface for CSL wheel-biped robot
     cmake ..
     make
     ```
+## IMU console logging
+
+The hardware interface hides routine IMU startup and periodic rate/age logs by
+default. Add `--imu-logs` to its existing command to enable them:
+
+```sh
+# Append this flag to your normal hardware-interface command when diagnosing IMU delivery:
+sudo ./build/pineapple_hardware_interface --imu-logs ./config/config_v3.yaml
+```
+
+Keep your usual `PINEAPPLE_IMU_PROFILE`, `PINEAPPLE_XSENS_LOW_LATENCY`, and
+`PINEAPPLE_XSENS_READINESS` environment settings. This flag changes console output
+only: sensor configuration, acquisition and DDS publication are unchanged.
+IMU errors and motor/watchdog messages remain visible. Dedicated `imu_probe`
+and `imu_dds_probe` diagnostics retain their output. The normal hardware-interface
+command above enables motors; changing logging does not make it a motor-free probe.
+
 ## IMU USB latency (FTDI adapters)
 
 A 100 Hz sensor can still arrive in delayed bursts. On V3, changing the FTDI

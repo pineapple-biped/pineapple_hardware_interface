@@ -3,8 +3,9 @@
 #include <algorithm>
 #include "../imu/configure_xsens.hpp"
 
-PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs, bool feedback_only)
-    : feedback_only_(feedback_only)
+PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs, bool feedback_only,
+                                     bool imu_logs)
+    : feedback_only_(feedback_only), imu_logs_(imu_logs)
 {
     if (feedback_only_) {
         for (const auto& cfg : platform_configs)
@@ -264,16 +265,16 @@ bool PineappleSdk2Bridge::InitXsensIMU()
         return false;
     }
     // Get the device object
-    cout << "Found a device with ID: " << xsens_mtPort.deviceId().toString().toStdString() << " @ port: " << xsens_mtPort.portName().toStdString() << ", baudrate: " << xsens_mtPort.baudrate() << endl;
+    if (imu_logs_) cout << "Found a device with ID: " << xsens_mtPort.deviceId().toString().toStdString() << " @ port: " << xsens_mtPort.portName().toStdString() << ", baudrate: " << xsens_mtPort.baudrate() << endl;
 	xsens_device = xsens_control->device(xsens_mtPort.deviceId());
 	assert(xsens_device != 0);
 
-	cout << "Device: " << xsens_device->productCode().toStdString() << ", with ID: " << xsens_device->deviceId().toString() << " opened." << endl;
+	if (imu_logs_) cout << "Device: " << xsens_device->productCode().toStdString() << ", with ID: " << xsens_device->deviceId().toString() << " opened." << endl;
 
     xsens_callback.setTarget(xsens_imu_data);
     xsens_device->addCallbackHandler(&xsens_callback);
     if (!configureXsens(*xsens_device, imuOutputProfileFromEnvironment(),
-                        xsens_mtPort.baudrate())) {
+                        xsens_mtPort.baudrate(), imu_logs_)) {
         std::cerr << "IMU configuration/readback failed." << std::endl;
         return false;
     }
@@ -282,6 +283,7 @@ bool PineappleSdk2Bridge::InitXsensIMU()
 
 void PineappleSdk2Bridge::ProcessXsensData()
 {
+    if (!imu_logs_) return;
     // Acquisition happens in the SDK callback. This thread only logs health;
     // terminal I/O cannot hold up acquisition or DDS publication.
     xsens_imu_data->resetTimingStats();

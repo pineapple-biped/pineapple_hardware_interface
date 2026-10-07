@@ -114,11 +114,13 @@ int main(int argc, char **argv)
     // Joint index order in LowCmd/LowState follows the argument order
     // (e.g. wheel biped config first -> joints 0-7, arm config second -> joints 8-13).
     bool feedback_only = false;
+    bool imu_logs = false;
     std::vector<std::string> config_paths;
     if (argc > 1)
     {
         for (int i = 1; i < argc; i++) {
             if (std::string(argv[i]) == "--feedback-only") feedback_only = true;
+            else if (std::string(argv[i]) == "--imu-logs") imu_logs = true;
             else config_paths.push_back(argv[i]);
         }
     }
@@ -160,7 +162,7 @@ int main(int argc, char **argv)
     if (feedback_only)
         std::cout << "FEEDBACK ONLY: repeated disable + status requests; no enable, zeroing, "
                      "parameter writes or command subscriber. IMU skipped." << std::endl;
-    PineappleSdk2Bridge pineapple_interface(platform_configs, feedback_only);
+    PineappleSdk2Bridge pineapple_interface(platform_configs, feedback_only, imu_logs);
 
     while (running)
     {
