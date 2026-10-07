@@ -4,7 +4,7 @@ import math
 import struct
 from types import SimpleNamespace
 
-from check_imu_dds import decode
+from check_imu_dds import decode, gc_overlap_ms
 
 
 def message(magic=b"IMD1", published=10.0, quat=(1.0, 0.0, 0.0, 0.0)):
@@ -36,4 +36,6 @@ def test_decode():
 
 if __name__ == "__main__":
   test_decode()
+  assert gc_overlap_ms(1, 2, [(1.5, 2.5, 2)]) == 500
+  assert gc_overlap_ms(1, 2, [(3, 4, 0)]) == 0
   print("DDS diagnostic decode tests passed")

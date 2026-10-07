@@ -3,6 +3,7 @@
 
 # ruff: noqa: B905 -- support robot Python versions older than 3.10
 import argparse
+import gc
 import json
 import math
 import struct
@@ -36,6 +37,10 @@ def decode(message, now):
   return (seq, published, (qtime, gtime, atime), now, gyro, gravity, magic == b"IMS1")
 
 
+def gc_overlap_ms(start, end, pauses):
+  return sum(max(0.0, min(end, b) - max(start, a)) * 1000 for a, b, _ in pauses)
+
+
 def run(seconds, hz, output):
   # Importing these initializes no command publisher. Only a subscriber is created.
   from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
@@ -48,6 +53,16 @@ def run(seconds, hz, output):
   errors = []
   observations = []
   accepting = True
+  gc_starts = {}
+  gc_pauses = []
+
+  def gc_event(phase, info):
+    now = time.monotonic()
+    generation = info["generation"]
+    if phase == "start":
+      gc_starts[generation] = now
+    elif generation in gc_starts:
+      gc_pauses.append((gc_starts.pop(generation), now, generation))
 
   def callback(message):
     nonlocal latest
@@ -66,6 +81,7 @@ def run(seconds, hz, output):
 
   sub = ChannelSubscriber("rt/imu_probe/lowstate", LowState_)
   sub.Init(callback, 10)  # Same queue length as deployment subscriber.
+  gc.callbacks.append(gc_event)
   try:
     deadline = time.monotonic() + 30
     while latest is None and time.monotonic() < deadline:
@@ -89,6 +105,7 @@ def run(seconds, hz, output):
       next_tick += 1 / hz
       time.sleep(max(0, next_tick - time.monotonic()))
   finally:
+    gc.callbacks.remove(gc_event)
     with lock:
       accepting = False
     sub.Close()
@@ -127,6 +144,32 @@ def run(seconds, hz, output):
         [(t - r[2][i]) * 1000 for t, r in observations]
       ),
     )
+  measured_pauses = [(a, b, g) for a, b, g in gc_pauses if b >= begin]
+  result["gc_pause_ms"] = describe([(b - a) * 1000 for a, b, _ in measured_pauses])
+  result["gc_events"] = len(measured_pauses)
+  result["worst_callback_delays"] = [
+    {
+      "elapsed_s": r[3] - begin,
+      "delay_ms": (r[3] - r[1]) * 1000,
+      "gc_overlap_ms": gc_overlap_ms(r[1], r[3], measured_pauses),
+    }
+    for r in sorted(rows, key=lambda r: r[3] - r[1], reverse=True)[:5]
+  ]
+  result["worst_observation_intervals"] = [
+    {
+      "elapsed_s": b[0] - begin,
+      "gap_ms": (b[0] - a[0]) * 1000,
+      "gc_overlap_ms": gc_overlap_ms(a[0], b[0], measured_pauses),
+    }
+    for a, b in sorted(
+      zip(observations, observations[1:]),
+      key=lambda pair: pair[1][0] - pair[0][0],
+      reverse=True,
+    )[:5]
+  ]
+  result["gc_caution"] = (
+    "Overlap supports attribution but does not alone establish causality. This proxy allocates recording objects; the controller may have a different GC load."
+  )
   result["limitation"] = (
     "Host age starts at SDK receipt, not sensor acquisition. Isolated DDS and observation proxy, no policy inference, motors, or full controller load."
   )
@@ -153,6 +196,9 @@ def run(seconds, hz, output):
       "SDK receipt to observation age ms:",
       v["sdk_callback_to_observation_age_ms"],
     )
+  print("GC events / pause ms:", result["gc_events"], result["gc_pause_ms"])
+  print("Worst callback delays:", result["worst_callback_delays"])
+  print("Worst observation intervals:", result["worst_observation_intervals"])
   print("JSON:", output)
   print(result["limitation"])
   return 1 if errors else 0

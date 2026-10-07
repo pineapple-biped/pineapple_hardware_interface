@@ -436,3 +436,10 @@ For development, `imu_dds_probe --synthetic` skips all device scanning/opening
 and publishes synthetic IMU samples. A local 5-second synthetic check received
 2500 DDS messages and consumed 250 observations without sequence loss. This
 checks software wiring only; its timing is not evidence of robot performance.
+
+The DDS receiver also records Python garbage-collection pause durations and
+reports their overlap with the five worst callback delays and observation
+intervals. This does not disable GC or change scheduling. A rare delay in this
+allocating diagnostic can be caused by its own recording workload; do not
+attribute it to the production controller without evidence. Correlated events
+support a hypothesis but are not by themselves proof of causality.
