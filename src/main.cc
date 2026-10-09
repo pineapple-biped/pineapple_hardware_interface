@@ -115,12 +115,23 @@ int main(int argc, char **argv)
     // (e.g. wheel biped config first -> joints 0-7, arm config second -> joints 8-13).
     bool feedback_only = false;
     bool imu_logs = false;
+    bool read_registers = false;
+    std::string motor_trace;
     std::vector<std::string> config_paths;
     if (argc > 1)
     {
         for (int i = 1; i < argc; i++) {
             if (std::string(argv[i]) == "--feedback-only") feedback_only = true;
             else if (std::string(argv[i]) == "--imu-logs") imu_logs = true;
+            else if (std::string(argv[i]) == "--read-motor-parameters") {
+                read_registers = true; feedback_only = true;
+            }
+            else if (std::string(argv[i]) == "--motor-trace" && i + 1 < argc)
+                motor_trace = argv[++i];
+            else if (std::string(argv[i]).rfind("--", 0) == 0) {
+                std::cerr << "Unknown/incomplete option: " << argv[i] << std::endl;
+                return 2;
+            }
             else config_paths.push_back(argv[i]);
         }
     }
@@ -152,6 +163,46 @@ int main(int argc, char **argv)
     }
     std::cout << "Total joints: " << joint_base << std::endl;
 
+    if (read_registers) {
+        // No DDS initialization/subscription. Constructor and destructor send disable.
+        std::cout << "DISABLED REGISTER DIAGNOSTIC: disable + allowlisted reads only; no IMU/DDS." << std::endl;
+        bool complete = true;
+        for (size_t platform = 0; platform < platform_configs.size(); ++platform) {
+            const auto& cfg = platform_configs[platform];
+            std::vector<damiao::DmActData> data;
+            for (size_t i = 0; i < cfg.can_id_list.size(); ++i)
+                data.push_back({static_cast<damiao::DM_Motor_Type>(cfg.motor_type[i]),
+                    damiao::MIT_MODE, cfg.can_id_list[i], cfg.mst_id_list[i]});
+            auto trace = motor_trace.empty() ? nullptr : std::make_shared<MotorTrace>(
+                motor_trace + "." + std::to_string(platform) + ".csv");
+            damiao::Motor_Control control(1000000, 5000000, cfg.dev_sn, &data, true, true, trace);
+            for (auto id : cfg.can_id_list) {
+                auto motor = control.getMotor(id);
+                const auto limits = motor->get_limit_param();
+                std::cout << "configured CAN=" << id << " PMAX=" << limits.Q_MAX
+                          << " VMAX=" << limits.DQ_MAX << " TMAX=" << limits.TAU_MAX << std::endl;
+                for (const auto& reg : std::vector<std::pair<int, const char*>>{
+                         {1,"KT"}, {10,"CTRL_MODE"}, {13,"hw_ver"}, {14,"sw_ver"},
+                         {20,"Gr"}, {21,"PMAX"}, {22,"VMAX"}, {23,"TMAX"}, {36,"sub_ver"}}) {
+                    if (!running) return 130;
+                    control.read_motor_param(*motor, reg.first);
+                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+                    while (running && !motor->is_have_param(reg.first) &&
+                           std::chrono::steady_clock::now() < deadline)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    std::cout << "register platform=" << platform << " CAN=" << id << ' ' << reg.second << '=';
+                    if (!motor->is_have_param(reg.first)) {
+                        complete = false; std::cout << "MISSING";
+                    } else if (reg.first == 10 || reg.first == 13 || reg.first == 14 || reg.first == 36)
+                        std::cout << motor->get_param_as_uint32(reg.first);
+                    else std::cout << motor->get_param_as_float(reg.first);
+                    std::cout << std::endl;
+                }
+            }
+        }
+        return complete ? 0 : 2;
+    }
+
     // DDS domain settings come from the first config
     YAML::Node yaml_node = YAML::LoadFile(config_paths[0]);
     config.domain_id = yaml_node["domain_id"].as<int>();
@@ -162,7 +213,7 @@ int main(int argc, char **argv)
     if (feedback_only)
         std::cout << "FEEDBACK ONLY: repeated disable + status requests; no enable, zeroing, "
                      "parameter writes or command subscriber. IMU skipped." << std::endl;
-    PineappleSdk2Bridge pineapple_interface(platform_configs, feedback_only, imu_logs);
+    PineappleSdk2Bridge pineapple_interface(platform_configs, feedback_only, imu_logs, motor_trace);
 
     while (running)
     {

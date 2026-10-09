@@ -32,6 +32,7 @@ Motor::Motor(DM_Motor_Type motor_type, Control_Mode ctrl_mode,uint16_t can_id, u
 
 void Motor::updateTimeInterval() 
 {
+    std::lock_guard<std::mutex> lock(feedback_mutex_);
     auto now = std::chrono::steady_clock::now();
     std::chrono::duration<double> dt = now - last_time_;
     last_time_ = now;
@@ -41,30 +42,38 @@ void Motor::updateTimeInterval()
 
 double Motor::getTimeInterval() 
 {
+    std::lock_guard<std::mutex> lock(feedback_mutex_);
     return delta_time_;
 }
 
 
-void Motor::receive_data(float q, float dq, float tau)
-{
-    this->state_q = q;
-    this->state_dq = dq;
-    this->state_tau = tau;
+FeedbackSnapshot Motor::GetFeedback() const {
+    std::lock_guard<std::mutex> lock(feedback_mutex_);
+    return {state_q, state_dq, state_tau, state_err, state_t_mos,
+            state_t_rotor, feedback_sequence_, host_receive_ns_, adapter_timestamp_raw_};
 }
-
-void Motor::receive_data(float q, float dq, float tau, uint8_t err, float t_mos, float t_rotor)
-{
-    this->state_q = q;
-    this->state_dq = dq;
-    this->state_tau = tau;
-    this->state_err = err;
-    this->state_t_mos = t_mos;
-    this->state_t_rotor = t_rotor;
-    this->last_feedback_time_ = std::chrono::steady_clock::now();
+void Motor::receive_data(float q, float dq, float tau) {
+    receive_data(q, dq, tau, 0, 0, 0);
+}
+void Motor::receive_data(float q, float dq, float tau, uint8_t err,
+                         float t_mos, float t_rotor, uint32_t adapter_timestamp,
+                         int64_t host_ns) {
+    std::lock_guard<std::mutex> lock(feedback_mutex_);
+    state_q = q; state_dq = dq; state_tau = tau;
+    state_err = err; state_t_mos = t_mos; state_t_rotor = t_rotor;
+    last_feedback_time_ = std::chrono::steady_clock::now();
+    host_receive_ns_ = host_ns ? host_ns : MotorTrace::Now();
+    adapter_timestamp_raw_ = adapter_timestamp;
+    ++feedback_sequence_;
+}
+void Motor::clear_param(int key) {
+    std::lock_guard<std::mutex> lock(param_mutex_);
+    param_map.erase(key);
 }
 
 void Motor::set_param(int key, float value)
 {
+    std::lock_guard<std::mutex> lock(param_mutex_);
     ValueType v{};
     v.value.floatValue = value;
     v.isFloat = true;
@@ -73,6 +82,7 @@ void Motor::set_param(int key, float value)
 
 void Motor::set_param(int key, uint32_t value)
 {
+    std::lock_guard<std::mutex> lock(param_mutex_);
     ValueType v{};
     v.value.uint32Value = value;
     v.isFloat = false;
@@ -81,6 +91,7 @@ void Motor::set_param(int key, uint32_t value)
 
 float Motor::get_param_as_float(int key) const
 {
+    std::lock_guard<std::mutex> lock(param_mutex_);
     auto it = param_map.find(key);
     if (it != param_map.end())
     {
@@ -98,6 +109,7 @@ float Motor::get_param_as_float(int key) const
 
 uint32_t Motor::get_param_as_uint32(int key) const 
 {
+    std::lock_guard<std::mutex> lock(param_mutex_);
     auto it = param_map.find(key);
     if (it != param_map.end()) {
         if (!it->second.isFloat) {
@@ -113,14 +125,18 @@ uint32_t Motor::get_param_as_uint32(int key) const
 
 bool Motor::is_have_param(int key) const
 {
+    std::lock_guard<std::mutex> lock(param_mutex_);
     return param_map.find(key) != param_map.end();
 }
 
 /******一个can，一个Motor_Control**********************/
 Motor_Control::Motor_Control(uint32_t nom_baud,uint32_t dat_baud,std::string sn,
-    std::vector<DmActData> *data_ptr, bool feedback_only)
-    : feedback_only_(feedback_only), data_ptr_(data_ptr)
+    std::vector<DmActData> *data_ptr, bool feedback_only, bool read_registers,
+    std::shared_ptr<MotorTrace> trace)
+    : feedback_only_(feedback_only), read_registers_(read_registers), trace_(std::move(trace)), data_ptr_(data_ptr)
 {
+    if (read_registers_ && !feedback_only_)
+        throw std::invalid_argument("register diagnostic requires disabled motors");
     for (auto it = data_ptr_->begin(); it != data_ptr_->end(); ++it) 
     {//遍历该bus下的所有电机
      std::shared_ptr<Motor> motor = std::make_shared<Motor>(it->motorType,it->mode,it->can_id, it->mst_id);
@@ -147,6 +163,7 @@ Motor_Control::~Motor_Control()
     std::cout<<"Enter ~Motor_Control"<<std::endl;
    
     disable_all();//使能该接口下的所有电机
+    usb_hw.reset(); // Stop callbacks before callback-owned state is destroyed.
 }
 
 /**
@@ -236,6 +253,8 @@ void Motor_Control::disable_all()
 float Motor_Control::read_motor_param(Motor &DM_Motor,uint8_t RID)
 {
     read_write_save=true;//发送读参数命令，返回的数据和常规返回的不一样，需要单独处理
+    DM_Motor.clear_param(RID);
+    pending_read_ = (int(DM_Motor.GetCanId()) << 8) | RID;
     uint16_t id = DM_Motor.GetCanId();
     uint8_t id_low = id & 0xff;
     uint8_t id_high = (id >> 8) & 0xff;
@@ -497,7 +516,24 @@ void Motor_Control::changeMotorLimit(Motor &DM_Motor,float P_MAX,float Q_MAX,flo
 }
 
 void Motor_Control::canframeCallback(can_value_type& value)
-{   
+{
+    const auto host_ns = MotorTrace::Now();
+    if (trace_) trace_->Add(0, value.head.id, value.head.time_stamp,
+                           value.data, 8, value.head.dlc, value.head.dir, host_ns);
+    // One-shot register mode never interprets register bytes as joint feedback.
+    if (read_registers_) {
+        const auto found = motors.find(value.head.id);
+        if (value.head.dlc == 8 && found != motors.end()) {
+            if (DiagnosticReplyMatches(value.data, value.head.dlc,
+                    found->second->GetCanId(), pending_read_.load())) {
+                pending_read_ = -1;
+                receive_param(value.data);
+            }
+        }
+        return;
+    }
+    if (value.head.dlc != 8) return;
+
     static auto uint_to_float = [](uint16_t x, float xmin, float xmax, uint8_t bits) -> float {
         float span = xmax - xmin;
         float data_norm = float(x) / ((1 << bits) - 1);
@@ -539,8 +575,10 @@ void Motor_Control::canframeCallback(can_value_type& value)
         uint8_t err = (value.data[0] >> 4) & 0x0F;
         float t_mos = static_cast<float>(value.data[6]);
         float t_rotor = static_cast<float>(value.data[7]);
-        m->receive_data(receive_q, receive_dq, receive_tau, err, t_mos, t_rotor);
+        m->receive_data(receive_q, receive_dq, receive_tau, err, t_mos, t_rotor,
+                        value.head.time_stamp, host_ns);
 
+        TraceFeedback(3, m->GetCanId(), m->GetFeedback(), host_ns);
         m->updateTimeInterval();
        
        double interval=m->getTimeInterval() ;
@@ -554,7 +592,18 @@ void Motor_Control::canframeCallback(can_value_type& value)
 
 
 void damiao::Motor_Control::SendFrame(std::vector<uint8_t>& data, uint32_t id) {
-    if (feedback_only_ && !FeedbackOnlyFrameAllowed(data, id))
+    if (feedback_only_ && !FeedbackOnlyFrameAllowed(data, id, read_registers_))
         throw std::runtime_error("feedback-only mode blocked a motor write");
+    if (trace_) trace_->Add(1, id, 0, data.data(), data.size());
     usb_hw->fdcanFrameSend(data, id);
+    if (trace_) trace_->Add(2, id, 0, data.data(), data.size());
+}
+
+void damiao::Motor_Control::TraceFeedback(unsigned event, uint16_t id,
+                                         const FeedbackSnapshot& feedback,
+                                         int64_t host_ns) {
+    if (!trace_) return;
+    uint8_t sequence[8];
+    for (unsigned i = 0; i < 8; ++i) sequence[i] = (feedback.sequence >> (8*i)) & 255;
+    trace_->Add(event, id, feedback.adapter_timestamp_raw, sequence, 8, 0, 0, host_ns);
 }

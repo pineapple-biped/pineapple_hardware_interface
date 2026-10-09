@@ -4,7 +4,7 @@
 #include "../imu/configure_xsens.hpp"
 
 PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs, bool feedback_only,
-                                     bool imu_logs)
+                                     bool imu_logs, const std::string& motor_trace)
     : feedback_only_(feedback_only), imu_logs_(imu_logs)
 {
     if (feedback_only_) {
@@ -29,7 +29,9 @@ PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_con
             ctrl_of_motor_.push_back(ctrl_idx);
         }
         motor_controls_.push_back(std::make_shared<damiao::Motor_Control>(nom_baud,dat_baud,
-          cfg.dev_sn,&dm_data,feedback_only_));
+          cfg.dev_sn,&dm_data,feedback_only_,false,
+          motor_trace.empty() ? nullptr : std::make_shared<MotorTrace>(
+              motor_trace + "." + std::to_string(ctrl_idx) + ".csv")));
 
         can_id_list.insert(can_id_list.end(), cfg.can_id_list.begin(), cfg.can_id_list.end());
         mst_id_list.insert(mst_id_list.end(), cfg.mst_id_list.begin(), cfg.mst_id_list.end());
@@ -199,16 +201,18 @@ void PineappleSdk2Bridge::PublishLowStateGo()
     {
         auto motor = CtrlOf(i)->getMotor(can_id_list[i]);
         int motor_type = motor->GetMotorMode();
-        double pos = motor->Get_Position();
-        double vel = motor->Get_Velocity();
-        double tau = motor->Get_tau();
-        uint8_t err = motor->Get_ERR();
+        const auto feedback = motor->GetFeedback();
+        CtrlOf(i)->TraceFeedback(4, can_id_list[i], feedback);
+        double pos = feedback.q;
+        double vel = feedback.dq;
+        double tau = feedback.tau;
+        uint8_t err = feedback.error;
 
         low_state_go_.motor_state()[i].q() = (pos - motor_offset[i]) * direction[i];
         low_state_go_.motor_state()[i].dq() = vel * direction[i];
         low_state_go_.motor_state()[i].tau_est() = tau * direction[i];
         low_state_go_.motor_state()[i].mode() = err;
-        low_state_go_.motor_state()[i].temperature() = static_cast<uint8_t>(motor->Get_T_MOS());
+        low_state_go_.motor_state()[i].temperature() = static_cast<uint8_t>(feedback.t_mos);
 
         if (!IsMotorConnected(i)) {
             auto now = std::chrono::steady_clock::now();
@@ -377,10 +381,11 @@ void PineappleSdk2Bridge::PrintMotorFeedback() {
     std::cout << "[feedback-only] index CAN raw_rad joint_rad age_ms status" << std::endl;
     for (int i = 0; i < num_motor_; ++i) {
         auto m = CtrlOf(i)->getMotor(can_id_list[i]);
-        const double raw = m->Get_Position();
+        const auto feedback = m->GetFeedback();
+        const double raw = feedback.q;
         std::cout << i << " 0x" << std::hex << can_id_list[i] << std::dec
                   << " " << raw << " " << (raw - motor_offset[i]) * direction[i]
                   << " " << m->GetTimeSinceLastFeedback() * 1000
-                  << " " << static_cast<int>(m->Get_ERR()) << std::endl;
+                  << " " << static_cast<int>(feedback.error) << std::endl;
     }
 }

@@ -22,5 +22,22 @@ int main() {
         assert(!FeedbackOnlyFrameAllowed({7, 0, static_cast<uint8_t>(op), 1, 0, 0, 0, 0}, 0x7FF));
     assert(!FeedbackOnlyFrameAllowed({}, 7));
     assert(!FeedbackOnlyFrameAllowed(std::vector<uint8_t>(8, 0), 7));
+    for (int rid = 0; rid < 256; ++rid) {
+        const std::vector<uint8_t> read{7, 0, 0x33, static_cast<uint8_t>(rid), 0, 0, 0, 0};
+        assert(FeedbackOnlyFrameAllowed(read, 0x7FF, true) == DiagnosticRegisterAllowed(rid));
+        for (int op : {0x55, 0xAA}) {
+            auto write = read; write[2] = op;
+            assert(!FeedbackOnlyFrameAllowed(write, 0x7FF, true));
+        }
+    }
+    assert(!FeedbackOnlyFrameAllowed({7,0,0x33,21,1,0,0,0}, 0x7FF, true));
+    assert(!FeedbackOnlyFrameAllowed({255,255,255,255,255,255,255,0xFC}, 7, true));
+    assert(!FeedbackOnlyFrameAllowed({255,255,255,255,255,255,255,0xFE}, 7, true));
+    uint8_t reply[8]{7,0,0x33,21,0,0,0,0};
+    assert(DiagnosticReplyMatches(reply, 8, 7, (7<<8)|21));
+    assert(!DiagnosticReplyMatches(reply, 8, 6, (7<<8)|21));
+    assert(!DiagnosticReplyMatches(reply, 8, 7, (7<<8)|22));
+    assert(!DiagnosticReplyMatches(reply, 7, 7, (7<<8)|21));
+    assert(!DiagnosticReplyMatches(reply, 8, 7, -1));
     std::cout << "feedback-only transmit allowlist tests passed\n";
 }

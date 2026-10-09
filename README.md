@@ -541,3 +541,60 @@ and do not manually manipulate a powered/enabled joint. Keep the robot supported
 and the independent stop available. Timeout exit 124 is expected; SIGINT requests
 normal bridge shutdown. Do not change calibration based only on a gravity-hanging
 pose or wrap published angles independently of the command conversion.
+
+### Motor register and timing diagnostics
+
+Stop the normal bridge and all command publishers first; keep the body rigidly
+supported. The following diagnostic **sends motor-disable commands**, then reads
+KT, control mode, firmware revisions, gear ratio and PMAX/VMAX/TMAX. It never
+enables motors, zeros encoders, writes parameters, starts DDS or starts the IMU.
+`set_zero` must be false. It exits after the reads; `MISSING` means no matching
+reply within 200 ms (exit code 2), not a register value of zero.
+
+```bash
+cd ~/pineapple_hardware_interface
+git switch fix/imu-rate-profiles
+git pull --ff-only
+cmake -S . -B build
+cmake --build build -j2
+ctest --test-dir build --output-on-failure
+mkdir -p motor_recordings
+stamp=$(date +%Y%m%d_%H%M%S)
+sudo ./build/pineapple_hardware_interface \
+  --read-motor-parameters --motor-trace "motor_recordings/registers_${stamp}" \
+  ./config/config_v3.yaml 2>&1 | tee "motor_recordings/registers_${stamp}.log"
+```
+
+Compare the printed `configured` protocol ranges with the returned registers;
+do not change ranges, offsets or torque scaling just from a fitted delay.
+Unsupported registers or incompatible firmware may require inspecting the raw
+reply trace. Register mode deliberately does not decode joint feedback.
+
+Then capture ten seconds with the motors disabled and status requests active:
+
+```bash
+stamp=$(date +%Y%m%d_%H%M%S)
+sudo timeout --signal=INT 10 ./build/pineapple_hardware_interface \
+  --feedback-only --motor-trace "motor_recordings/feedback_${stamp}" \
+  ./config/config_v3.yaml 2>&1 | tee "motor_recordings/feedback_${stamp}.log"
+```
+
+Timeout exit status 124 is expected. Each adapter produces a `.0.csv`, `.1.csv`,
+etc. Trace rows contain host monotonic nanoseconds, raw adapter timestamps and
+CAN bytes. Event 0 is adapter callback entry; 1/2 bracket the USB submission;
+3 identifies decoded feedback; 4 identifies the feedback snapshot used to build
+DDS state. Events 3/4 encode a per-motor sequence in bytes b0..b7, little-endian.
+DDS fields, calibration and gains are unchanged. Position, velocity, torque,
+status and temperature now come from one locked snapshot per motor; this does
+not imply simultaneous sampling across different motors.
+
+Tracing is off by default. It preallocates a bounded 500,000-event memory buffer
+per adapter and writes on clean shutdown, avoiding file I/O in the callbacks.
+Check `# dropped=` in every CSV; a nonzero count makes the capture incomplete.
+SIGKILL or power loss loses the in-memory trace. Tracing still has CPU/mutex
+cost and must be measured on the robot. Raw adapter timestamp units, clock and
+direction-bit semantics are not yet verified. USB submission return is not a
+motor-application timestamp, and DDS snapshot use precedes publication. These
+traces alone do not measure absolute sensor or actuator delay. Use the disabled
+mode first; adding `--motor-trace` alone to a normal bridge does **not** disable
+motors. Routine IMU logs remain opt-in via `--imu-logs`.
