@@ -598,3 +598,66 @@ motor-application timestamp, and DDS snapshot use precedes publication. These
 traces alone do not measure absolute sensor or actuator delay. Use the disabled
 mode first; adding `--motor-trace` alone to a normal bridge does **not** disable
 motors. Routine IMU logs remain opt-in via `--imu-logs`.
+
+### Controlled motor submission-order experiment (V3)
+
+`--rotate-motor-send-order` moves global motor index 0 to the end of the normal
+LowCmd submission loop. For the unmodified V3 config this changes CAN order from
+`5,6,7,8,1,2,3,4` to `6,7,8,1,2,3,4,5`: left thigh first, left hip last.
+Joint indices, offsets, signs, gains, command values, fault checks, watchdog,
+startup enable, stop/disable order, status polling and feedback order are not
+changed. Do not reorder YAML arrays. The startup log prints the selected
+`joint_index:CAN_ID` order. Omitting the flag keeps the existing default.
+The flag is rejected with feedback-only or register-diagnostic mode before
+opening devices; it is an active-control experiment, not a passive test.
+
+Use the same fixed-base ANYmal 25%, legs 140/2.0, wheels 0/0.4 as the completed
+baseline. Keep the body secured and wheels/legs clear; stop any previous bridge
+and controller. Terminal 1 (normal bridge, capable of enabling motors):
+
+```bash
+cd ~/pineapple_hardware_interface
+git pull --ff-only
+cmake -S . -B build
+cmake --build build -j2
+ctest --test-dir build --output-on-failure
+mkdir -p motor_recordings
+stamp=$(date +%Y%m%d_%H%M%S)
+prefix="motor_recordings/anymal140_kd2_rotated_${stamp}"
+sudo env PINEAPPLE_IMU_PROFILE=fast500 \
+  PINEAPPLE_XSENS_LOW_LATENCY=1 PINEAPPLE_XSENS_READINESS=1 \
+  ./build/pineapple_hardware_interface \
+  --rotate-motor-send-order --motor-trace "$prefix" \
+  ./config/config_v3.yaml > "${prefix}.log" 2>&1
+```
+
+Terminal 2 (explicitly commands motion, including preparation):
+
+```bash
+cd ~/pineapple-v3-sysid-stage
+conda activate rl
+mkdir -p data/hardware_commissioning
+stamp=$(date +%Y%m%d_%H%M%S)
+python -m pineapple_sysid.collect_profiles \
+  --profile anymal --amplitude-scale 0.25 --gain-profile kp140-kd2.0 \
+  --hardware --arm --fixed-base --watchdog-confirmed \
+  --domain 1 --interface eth0 \
+  --output "data/hardware_commissioning/anymal25_kp140_kd2p0_rotated_${stamp}.mcap"
+```
+
+After completion or abort, promptly Ctrl+C Terminal 1 once and wait for its
+prompt so the bounded trace is saved. Do not leave it recording for several
+minutes. Check in Terminal 1:
+
+```bash
+grep '^\[motor-send-order\]' "${prefix}.log"
+grep '^# dropped=' "${prefix}.0.csv"
+ls -lh "${prefix}.0.csv"
+tail -n 8 "${prefix}.log"
+```
+
+Expected order line: `[motor-send-order] rotated joint_index:CAN_ID 1:6 2:7 3:8 4:1 5:2 6:3 7:4 0:5`.
+If missing-reply associations follow the new first motor, investigate submission
+ordering/adapter/bus interaction; if they remain on CAN 5, investigate that
+motor's path. These are discriminating hypotheses, not guaranteed diagnoses.
+Do not enable this option for deployment based only on the test's completion.

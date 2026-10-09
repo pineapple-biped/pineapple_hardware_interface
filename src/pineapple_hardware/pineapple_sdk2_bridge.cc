@@ -1,10 +1,12 @@
 #include "pineapple_sdk2_bridge.h"
+#include "motor_send_order.h"
 
 #include <algorithm>
 #include "../imu/configure_xsens.hpp"
 
 PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs, bool feedback_only,
-                                     bool imu_logs, const std::string& motor_trace)
+                                     bool imu_logs, const std::string& motor_trace,
+                                     bool rotate_motor_send_order)
     : feedback_only_(feedback_only), imu_logs_(imu_logs)
 {
     if (feedback_only_) {
@@ -49,6 +51,13 @@ PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_con
         }
     }
     num_motor_ = can_id_list.size();
+    motor_send_order_ = MotorSendOrder(num_motor_, rotate_motor_send_order);
+    std::cout << "[motor-send-order] "
+              << (rotate_motor_send_order ? "rotated" : "default")
+              << " joint_index:CAN_ID";
+    for (int i : motor_send_order_)
+        std::cout << " " << i << ":" << can_id_list[i];
+    std::cout << std::endl;
 
     xsens_imu_data = std::make_shared<ImuSharedData>();
     last_fault_recovery_time_.resize(num_motor_, std::chrono::steady_clock::now());
@@ -147,7 +156,7 @@ void PineappleSdk2Bridge::LowCmdGoHandler(const void *msg)
         DisableMotorsLocked();
         return;
     }
-    for (int i = 0; i < num_motor_; i++)
+    for (int i : motor_send_order_)
     {
         auto motor = CtrlOf(i)->getMotor(can_id_list[i]);
         uint8_t err = motor->Get_ERR();

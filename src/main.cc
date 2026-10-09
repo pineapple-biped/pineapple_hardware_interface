@@ -116,6 +116,7 @@ int main(int argc, char **argv)
     bool feedback_only = false;
     bool imu_logs = false;
     bool read_registers = false;
+    bool rotate_motor_send_order = false;
     std::string motor_trace;
     std::vector<std::string> config_paths;
     if (argc > 1)
@@ -123,6 +124,8 @@ int main(int argc, char **argv)
         for (int i = 1; i < argc; i++) {
             if (std::string(argv[i]) == "--feedback-only") feedback_only = true;
             else if (std::string(argv[i]) == "--imu-logs") imu_logs = true;
+            else if (std::string(argv[i]) == "--rotate-motor-send-order")
+                rotate_motor_send_order = true;
             else if (std::string(argv[i]) == "--read-motor-parameters") {
                 read_registers = true; feedback_only = true;
             }
@@ -134,6 +137,10 @@ int main(int argc, char **argv)
             }
             else config_paths.push_back(argv[i]);
         }
+    }
+    if (rotate_motor_send_order && feedback_only) {
+        std::cerr << "--rotate-motor-send-order applies only to normal command mode; no devices opened\n";
+        return 2;
     }
     if (config_paths.empty())
     {
@@ -213,7 +220,8 @@ int main(int argc, char **argv)
     if (feedback_only)
         std::cout << "FEEDBACK ONLY: repeated disable + status requests; no enable, zeroing, "
                      "parameter writes or command subscriber. IMU skipped." << std::endl;
-    PineappleSdk2Bridge pineapple_interface(platform_configs, feedback_only, imu_logs, motor_trace);
+    PineappleSdk2Bridge pineapple_interface(platform_configs, feedback_only, imu_logs,
+                                             motor_trace, rotate_motor_send_order);
 
     while (running)
     {

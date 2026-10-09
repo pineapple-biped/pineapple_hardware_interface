@@ -48,7 +48,8 @@ public:
     // Platforms are concatenated: the joint index in LowCmd/LowState follows
     // the order of platform_configs (platform 0 motors first, then platform 1, ...).
     PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs, bool feedback_only = false,
-                       bool imu_logs = false, const std::string& motor_trace = "");
+                       bool imu_logs = false, const std::string& motor_trace = "",
+                       bool rotate_motor_send_order = false);
     ~PineappleSdk2Bridge();
 
     void PrintMotorFeedback();
@@ -91,6 +92,7 @@ public:
     private:
     const bool feedback_only_;
     const bool imu_logs_;
+    std::vector<int> motor_send_order_;
 
     void HandleMotorFault(int motor_idx);
     void WatchCommands();
