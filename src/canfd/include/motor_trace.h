@@ -29,7 +29,7 @@ public:
         return std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
     }
-    explicit MotorTrace(const std::string& path, size_t capacity = 500000)
+    explicit MotorTrace(const std::string& path, size_t capacity = 2000000)
         : file_(path), capacity_(capacity) {
         if (!file_) throw std::runtime_error("Cannot open motor trace: " + path);
         events_.reserve(capacity_);

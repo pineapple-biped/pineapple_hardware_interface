@@ -588,7 +588,7 @@ DDS fields, calibration and gains are unchanged. Position, velocity, torque,
 status and temperature now come from one locked snapshot per motor; this does
 not imply simultaneous sampling across different motors.
 
-Tracing is off by default. It preallocates a bounded 500,000-event memory buffer
+Tracing is off by default. It preallocates a bounded 2,000,000-event memory buffer
 per adapter and writes on clean shutdown, avoiding file I/O in the callbacks.
 Check `# dropped=` in every CSV; a nonzero count makes the capture incomplete.
 SIGKILL or power loss loses the in-memory trace. Tracing still has CPU/mutex
