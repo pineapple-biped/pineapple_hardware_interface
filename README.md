@@ -661,3 +661,82 @@ If missing-reply associations follow the new first motor, investigate submission
 ordering/adapter/bus interaction; if they remain on CAN 5, investigate that
 motor's path. These are discriminating hypotheses, not guaranteed diagnoses.
 Do not enable this option for deployment based only on the test's completion.
+
+### Passive USB bulk-transfer audit
+
+The bundled ARM and x86 adapter libraries use 1 ms bulk-read timeouts and skip
+parsing on `LIBUSB_ERROR_TIMEOUT`, without inspecting the transferred byte count.
+A timeout can contain data (see [libusb's synchronous I/O documentation](https://libusb.sourceforge.io/api-1.0/group__libusb__syncio.html)).
+This is a potential loss path, not yet a proven explanation for the missing
+first-motor replies. The send path also does not verify the transferred length.
+
+`diagnostics/usb_bulk_audit.cpp` observes the actual return codes and byte counts.
+It forwards every call unchanged, adds atomic counters, and prints one
+`USB_BULK_AUDIT` JSON line at clean process exit. No per-transfer file I/O,
+retries, timeout changes, motor commands, or receive-data recovery are added.
+Instrumentation adds a small execution overhead. These are whole-process counts,
+including startup/shutdown; they do not establish which motor lost a reply.
+Ordinary zero-byte read timeouts and successful short reads are not errors.
+
+Build and test on the robot (the test uses a fake library, no USB access):
+
+```bash
+cd ~/pineapple_hardware_interface
+git pull --ff-only
+mkdir -p build motor_recordings
+bash diagnostics/test_usb_bulk_audit.sh
+c++ -std=c++17 -O2 -Wall -Wextra -Werror -shared -fPIC \
+  diagnostics/usb_bulk_audit.cpp -ldl -o build/libusb_bulk_audit.so
+```
+
+Terminal 1: start the normal bridge with the observer. This normal bridge enables
+motors; use the established fixed-body collection setup. The original send order
+is used. Start Terminal 2 promptly as for the previous collections.
+
+```bash
+cd ~/pineapple_hardware_interface
+stamp=$(date +%Y%m%d_%H%M%S)
+prefix="motor_recordings/usb_audit_${stamp}"
+printf '%s\n' "$prefix" > motor_recordings/latest_usb_audit_prefix.txt
+sudo env LD_PRELOAD="$PWD/build/libusb_bulk_audit.so" \
+  PINEAPPLE_IMU_PROFILE=fast500 PINEAPPLE_XSENS_LOW_LATENCY=1 \
+  PINEAPPLE_XSENS_READINESS=1 \
+  ./build/pineapple_hardware_interface --motor-trace "$prefix" \
+  ./config/config_v3.yaml > "${prefix}.log" 2>&1
+```
+
+Terminal 2: unchanged ANYmal 25% collection, leg Kp 140/Kd 2, wheel Kv 0.4:
+
+```bash
+cd ~/pineapple-v3-sysid-stage
+conda activate rl
+stamp=$(date +%Y%m%d_%H%M%S)
+python -m pineapple_sysid.collect_profiles \
+  --profile anymal --amplitude-scale 0.25 --gain-profile kp140-kd2.0 \
+  --hardware --arm --fixed-base --watchdog-confirmed \
+  --domain 1 --interface eth0 \
+  --output "data/hardware_commissioning/anymal25_usb_audit_${stamp}.mcap"
+```
+
+Once collection finishes or aborts, press Ctrl+C once in Terminal 1 and wait for
+clean shutdown. Then in Terminal 1:
+
+```bash
+prefix=$(cat motor_recordings/latest_usb_audit_prefix.txt)
+grep '^USB_BULK_AUDIT ' "${prefix}.log" |
+  sed 's/^USB_BULK_AUDIT //' > motor_recordings/usb_audit_summary.json
+cat motor_recordings/usb_audit_summary.json
+grep '^# dropped=' "${prefix}.0.csv"
+```
+
+An empty summary means the observer did not report; do not interpret it as zero
+errors. Endpoint 3 is command output; 129/131 are adapter inputs in the inspected
+library. A nonzero `partial_timeouts` on an input would confirm the library is
+skipping received bytes, but linking those bytes to missing motor replies needs
+further evidence. Do not change timeouts or suppress errors based on totals alone.
+
+Download only the small summary from your laptop/workstation:
+
+```bash
+scp pineapple-v3@192.168.0.169:~/pineapple_hardware_interface/motor_recordings/usb_audit_summary.json .
+```
