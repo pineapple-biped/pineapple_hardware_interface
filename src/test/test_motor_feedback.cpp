@@ -42,6 +42,15 @@ int main() {
     }
     std::ifstream f(path);
     const std::string text((std::istreambuf_iterator<char>(f)), {});
+    assert(MotorTrace::ParseCapacity("4000000") == 4000000);
+    for (const auto* bad : {"0", "-1", "1.5", "10000001", "", "9999999999999999999999999"}) {
+        bool rejected = false;
+        try { MotorTrace::ParseCapacity(bad); } catch (const std::exception&) { rejected = true; }
+        assert(rejected);
+    }
+    assert(text.find("# capacity=2") != std::string::npos);
+    assert(text.find("# retained=2") != std::string::npos);
+    assert(text.find("# first_drop_host_monotonic_ns=5678") != std::string::npos);
     assert(text.find("# dropped=1") != std::string::npos);
     assert(text.find("5678,0,24,1234,8,8,0,1,2,3,4,5,6,7,8") != std::string::npos);
     std::filesystem::remove(path);

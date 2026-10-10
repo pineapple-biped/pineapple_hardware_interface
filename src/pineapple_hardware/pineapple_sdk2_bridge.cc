@@ -6,7 +6,7 @@
 
 PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs, bool feedback_only,
                                      bool imu_logs, const std::string& motor_trace,
-                                     bool rotate_motor_send_order)
+                                     bool rotate_motor_send_order, size_t motor_trace_capacity)
     : feedback_only_(feedback_only), imu_logs_(imu_logs)
 {
     if (feedback_only_) {
@@ -33,7 +33,7 @@ PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_con
         motor_controls_.push_back(std::make_shared<damiao::Motor_Control>(nom_baud,dat_baud,
           cfg.dev_sn,&dm_data,feedback_only_,false,
           motor_trace.empty() ? nullptr : std::make_shared<MotorTrace>(
-              motor_trace + "." + std::to_string(ctrl_idx) + ".csv")));
+              motor_trace + "." + std::to_string(ctrl_idx) + ".csv", motor_trace_capacity)));
 
         can_id_list.insert(can_id_list.end(), cfg.can_id_list.begin(), cfg.can_id_list.end());
         mst_id_list.insert(mst_id_list.end(), cfg.mst_id_list.begin(), cfg.mst_id_list.end());

@@ -49,7 +49,7 @@ public:
     // the order of platform_configs (platform 0 motors first, then platform 1, ...).
     PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs, bool feedback_only = false,
                        bool imu_logs = false, const std::string& motor_trace = "",
-                       bool rotate_motor_send_order = false);
+                       bool rotate_motor_send_order = false, size_t motor_trace_capacity = 2000000);
     ~PineappleSdk2Bridge();
 
     void PrintMotorFeedback();

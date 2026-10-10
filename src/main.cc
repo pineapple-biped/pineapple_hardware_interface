@@ -118,6 +118,7 @@ int main(int argc, char **argv)
     bool read_registers = false;
     bool rotate_motor_send_order = false;
     std::string motor_trace;
+    size_t motor_trace_capacity = 2000000;
     std::vector<std::string> config_paths;
     if (argc > 1)
     {
@@ -128,6 +129,13 @@ int main(int argc, char **argv)
                 rotate_motor_send_order = true;
             else if (std::string(argv[i]) == "--read-motor-parameters") {
                 read_registers = true; feedback_only = true;
+            }
+            else if (std::string(argv[i]) == "--motor-trace-capacity" && i + 1 < argc) {
+                try { motor_trace_capacity = MotorTrace::ParseCapacity(argv[++i]); }
+                catch (const std::exception& e) {
+                    std::cerr << e.what() << "; no devices opened\n";
+                    return 2;
+                }
             }
             else if (std::string(argv[i]) == "--motor-trace" && i + 1 < argc)
                 motor_trace = argv[++i];
@@ -181,7 +189,7 @@ int main(int argc, char **argv)
                 data.push_back({static_cast<damiao::DM_Motor_Type>(cfg.motor_type[i]),
                     damiao::MIT_MODE, cfg.can_id_list[i], cfg.mst_id_list[i]});
             auto trace = motor_trace.empty() ? nullptr : std::make_shared<MotorTrace>(
-                motor_trace + "." + std::to_string(platform) + ".csv");
+                motor_trace + "." + std::to_string(platform) + ".csv", motor_trace_capacity);
             damiao::Motor_Control control(1000000, 5000000, cfg.dev_sn, &data, true, true, trace);
             for (auto id : cfg.can_id_list) {
                 auto motor = control.getMotor(id);
@@ -221,7 +229,7 @@ int main(int argc, char **argv)
         std::cout << "FEEDBACK ONLY: repeated disable + status requests; no enable, zeroing, "
                      "parameter writes or command subscriber. IMU skipped." << std::endl;
     PineappleSdk2Bridge pineapple_interface(platform_configs, feedback_only, imu_logs,
-                                             motor_trace, rotate_motor_send_order);
+                                             motor_trace, rotate_motor_send_order, motor_trace_capacity);
 
     while (running)
     {

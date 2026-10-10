@@ -794,3 +794,39 @@ or transport errors need inspection. These totals verify byte handling; rerun
 the existing per-motor gap analysis on the paired MCAP/trace to validate feedback
 reliability during motion. Do not infer a successful hardware fix solely from
 passing offline tests or matching byte totals.
+
+### Trace capacity for long wheel collections
+
+`--motor-trace` retains a bounded prefix in RAM and writes it on clean shutdown.
+Its default two million events filled after 202.39 seconds in the broad low-speed
+wheel trial, omitting the last 6.63 seconds of the profile. `# dropped` counts
+**diagnostic events not saved**, not lost motor commands or USB packets. Keeping
+the bridge alive before/after collection also consumes capacity.
+
+For the approximately 191–197 second low-speed collection, use:
+
+```bash
+sudo env PINEAPPLE_IMU_PROFILE=fast500 \
+  PINEAPPLE_XSENS_LOW_LATENCY=1 PINEAPPLE_XSENS_READINESS=1 \
+  ./build/pineapple_hardware_interface \
+  --motor-trace "$prefix" --motor-trace-capacity 4000000 \
+  ./config/config_v3.yaml > "${prefix}.log" 2>&1
+```
+
+Set `prefix` to a fresh recording path first. Four million events reserve about
+160 MB per adapter on the current build, providing roughly six minutes at the
+observed event rate; duration varies with command/feedback rates. Startup logs
+show exact reserved bytes. Capacity is limited to 1–10 million events and invalid
+CLI values fail before opening devices. Defaults and motor control are unchanged.
+Stop with Ctrl+C promptly after collection and wait for the CSV to flush. Do not
+use SIGKILL or a pipe through `tee` that could terminate before flushing.
+
+The CSV now includes `capacity`, `retained`, `first_drop_host_monotonic_ns` (zero
+if none) and `dropped`. The first-drop timestamp belongs to the first rejected
+event in enqueue order; concurrent producers can timestamp out of order. Keep a
+margin when comparing it to a command window. Check both trace coverage and
+these counters before claiming complete transport evidence:
+
+```bash
+grep -E '^# (capacity|retained|first_drop_host_monotonic_ns|dropped)=' "${prefix}.0.csv"
+```
