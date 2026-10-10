@@ -20,20 +20,24 @@ target_include_directories(motor PUBLIC
     ${LIBUSB_INCLUDE_DIRS}
 )
 
-# Select proper library based on architecture
+# Keep vendor binaries untouched. Weaken only the two receive entry points in
+# a build-local copy, so our strong definitions replace internal references too.
 if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "aarch64")
-    target_link_libraries(motor PRIVATE
-    Threads::Threads
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/canfd/lib/arm/libu2canfd.a
-    ${LIBUSB_LIBRARIES}
-)
+    set(ADAPTER_ARCH arm)
 else()
-    target_link_libraries(motor PRIVATE
-    Threads::Threads
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/canfd/lib/x86/libu2canfd.a
-    ${LIBUSB_LIBRARIES}
-)
+    set(ADAPTER_ARCH x86)
 endif()
+set(ADAPTER_VENDOR "${CMAKE_CURRENT_SOURCE_DIR}/src/canfd/lib/${ADAPTER_ARCH}/libu2canfd.a")
+set(ADAPTER_FIXED "${CMAKE_CURRENT_BINARY_DIR}/libu2canfd_rx_override.a")
+add_custom_command(OUTPUT "${ADAPTER_FIXED}"
+    COMMAND ${CMAKE_OBJCOPY}
+      --weaken-symbol=_ZN9usb_class15get_data_threadEv
+      --weaken-symbol=_ZN9usb_class14can_rev_threadEv
+      "${ADAPTER_VENDOR}" "${ADAPTER_FIXED}"
+    DEPENDS "${ADAPTER_VENDOR}" VERBATIM)
+add_custom_target(adapter_rx_archive DEPENDS "${ADAPTER_FIXED}")
+add_dependencies(motor adapter_rx_archive)
+target_link_libraries(motor PRIVATE Threads::Threads "${ADAPTER_FIXED}" ${LIBUSB_LIBRARIES})
 
 ## IMU setup
 include_directories(
@@ -122,4 +126,23 @@ if(BUILD_TESTING)
     add_executable(test_motor_send_order src/test/test_motor_send_order.cpp)
     target_compile_options(test_motor_send_order PRIVATE -UNDEBUG)
     add_test(NAME motor_send_order COMMAND test_motor_send_order)
+endif()
+
+# Force the override object into executables before resolving the vendor archive.
+target_sources(motor PRIVATE src/canfd/usb_rx_fix.cpp)
+target_link_options(motor INTERFACE
+    "LINKER:--undefined=_ZN9usb_class13receive_fixedEh")
+if(BUILD_TESTING)
+    add_executable(test_usb_rx_stream src/test/test_usb_rx_stream.cpp)
+    target_link_libraries(test_usb_rx_stream motor pthread)
+    target_compile_options(test_usb_rx_stream PRIVATE -UNDEBUG)
+    add_test(NAME usb_rx_stream COMMAND test_usb_rx_stream)
+endif()
+if(BUILD_TESTING)
+    add_executable(test_usb_rx_loop src/test/test_usb_rx_loop.cpp src/canfd/usb_rx_fix.cpp)
+    target_include_directories(test_usb_rx_loop PRIVATE src/canfd/include ${LIBUSB_INCLUDE_DIRS})
+    # Only CRC archive member is needed; USB and device lifecycle are stubs.
+    target_link_libraries(test_usb_rx_loop PRIVATE "${ADAPTER_VENDOR}" pthread)
+    target_compile_options(test_usb_rx_loop PRIVATE -UNDEBUG)
+    add_test(NAME usb_rx_loop COMMAND test_usb_rx_loop)
 endif()

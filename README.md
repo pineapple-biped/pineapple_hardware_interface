@@ -740,3 +740,57 @@ Download only the small summary from your laptop/workstation:
 ```bash
 scp pineapple-v3@192.168.0.169:~/pineapple_hardware_interface/motor_recordings/usb_audit_summary.json .
 ```
+
+### Receive timeout data preservation
+
+The receive-loop fix is built in after rebuilding the bridge. It processes bytes
+returned with either success or timeout, retains incomplete envelopes across USB
+reads, separates concatenated envelopes, and verifies their length, CRC and tail
+before invoking the existing CAN decoder. Empty timeouts are ignored. Buffers are
+bounded by the 16-bit payload length (65,542 bytes including envelope). Counters
+are printed once on clean shutdown as `USB_RX_FIXED`, per input endpoint:
+`partial_timeouts`, `recovered_bytes`, CRC-valid envelope `frames`,
+`rejected_bytes`, and incomplete `pending_bytes`. An envelope can contain multiple
+CAN records; `frames` is not a motor feedback count. The current vendor decoder's
+CAN frame support is unchanged.
+
+Because the supplied vendor library is binary-only, CMake makes a build-local
+copy with just the two receive entry symbols weakened. Strong source definitions
+replace those entry points; the original archives, class memory layout, control
+transfers, transmit code, 1 ms timeout and motor send order remain unchanged.
+`test_usb_rx_loop` substitutes USB and device lifecycle with offline stubs; it
+checks delivery of complete and split timeout packets without opening hardware.
+
+Rebuild before repeating the two-terminal passive audit above:
+
+```bash
+cd ~/pineapple_hardware_interface
+git pull --ff-only
+cmake -S . -B build
+cmake --build build -j4
+ctest --test-dir build --output-on-failure
+```
+
+Use the original send order (omit `--rotate-motor-send-order`) and the same
+ANYmal25 gains. Keep the passive observer enabled so its byte counts can be
+compared with the new receive counters. After Ctrl+C and clean shutdown:
+
+```bash
+grep -E '^USB_RX_FIXED|^USB_BULK_AUDIT|^\[usb-rx\]' "${prefix}.log" > motor_recordings/usb_rx_fixed_summary.txt
+grep '^# dropped=' "${prefix}.0.csv" >> motor_recordings/usb_rx_fixed_summary.txt
+cat motor_recordings/usb_rx_fixed_summary.txt
+```
+
+From the laptop/workstation:
+
+```bash
+scp pineapple-v3@192.168.0.169:~/pineapple_hardware_interface/motor_recordings/usb_rx_fixed_summary.txt .
+```
+
+A nonzero audit `partial_timeouts` is still expected: the fix preserves its bytes
+rather than changing USB return codes. Compare with `recovered_bytes`. A nonzero
+`pending_bytes` at shutdown may be a capture boundary. Unexpected rejected bytes
+or transport errors need inspection. These totals verify byte handling; rerun
+the existing per-motor gap analysis on the paired MCAP/trace to validate feedback
+reliability during motion. Do not infer a successful hardware fix solely from
+passing offline tests or matching byte totals.
