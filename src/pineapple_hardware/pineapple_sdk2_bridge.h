@@ -11,6 +11,7 @@
 #include <unitree/idl/go2/LowCmd_.hpp>
 #include "../canfd/include/damiao.h"
 #include "../imu/xsens_imu.hpp"
+#include "../imu/configure_xsens.hpp"
 
 using namespace unitree::common;
 using namespace unitree::robot;
@@ -56,7 +57,6 @@ public:
 
     // IMU related
     bool InitXsensIMU();
-    void ProcessXsensData();
     void CloseXsensIMU();
 
     ChannelSubscriberPtr<unitree_go::msg::dds_::LowCmd_> low_cmd_go_suber_;
@@ -70,8 +70,6 @@ public:
 
     int dim_motor_sensor_ = 0;
 
-    // Resolved from the platform configs in the ctor, then cleared again if
-    // the MTi cannot actually be brought up.
     bool have_imu_ = false;
 
     // Concatenation of all platform configs, indexed by global joint index.
@@ -110,10 +108,8 @@ public:
     double poll_interval_sec_ = 0.02;    // actively solicit feedback at 50 Hz
 
     // IMU related
-    std::thread xsens_imu_thread;
     std::shared_ptr<ImuSharedData> xsens_imu_data;
 
-    static constexpr int kImuOutputRateHz = 100;
     XsControl* xsens_control = nullptr;
     XsPortInfo xsens_mtPort;
     CallbackHandler xsens_callback;

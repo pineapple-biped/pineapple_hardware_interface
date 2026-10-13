@@ -148,7 +148,13 @@ int main(int argc, char **argv)
 
     // Main function
     ChannelFactory::Instance()->Init(config.domain_id, config.interface);
-    PineappleSdk2Bridge pineapple_interface(platform_configs);
+    std::unique_ptr<PineappleSdk2Bridge> pineapple_interface;
+    try {
+        pineapple_interface = std::make_unique<PineappleSdk2Bridge>(platform_configs);
+    } catch (const std::exception &e) {
+        std::cerr << e.what() << std::endl;
+        return 1;
+    }
 
     while (running)
     {

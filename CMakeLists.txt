@@ -84,3 +84,6 @@ add_executable(example_mti_receive_data
     src/test/example_mti_receive_data.cpp
 )
 target_link_libraries(example_mti_receive_data ${XSENS_OBJ_LIBS})
+
+add_executable(imu_probe src/test/imu_probe.cpp)
+target_link_libraries(imu_probe ${XSENS_OBJ_LIBS} pthread)
