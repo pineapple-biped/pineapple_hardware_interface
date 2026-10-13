@@ -1,8 +1,8 @@
 # Pineapple 6-DOF arm
 domain_id: 1  # Domain id
-interface: "lo" # Interface
+interface: "eth0" # Interface
 
-dev_sn: ""  # USB2CANFD serial number; run ./scan_canfd_sn to list connected devices
+dev_sn: "14AA044B241402B10DDBDAFE448040BB"  # USB2CANFD serial number; run ./scan_canfd_sn to list connected devices
 set_zero: false 
 
 have_imu: false  # the MTi is on the robot body, not the arm
