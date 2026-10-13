@@ -11,6 +11,7 @@
 #include <cmath>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <signal.h>
 #include <iostream>
 #include <boost/bind/bind.hpp>
@@ -139,9 +140,18 @@ struct DmActData
     uint16_t mst_id;
 };
 
+struct FeedbackSnapshot {
+    float q, dq, tau;
+    uint8_t error;
+    float t_mos, t_rotor;
+    uint64_t sequence;
+};
+
 class Motor
 {
 private:
+    mutable std::mutex feedback_mutex_, param_mutex_;
+    uint64_t feedback_sequence_ = 0;
     /* data */
     uint16_t Can_id;
     uint16_t Master_id;
@@ -168,7 +178,7 @@ private:
 
     std::unordered_map<uint32_t , ValueType> param_map;
     std::chrono::steady_clock::time_point last_time_;
-    double delta_time_;
+    double delta_time_ = 0;
 public:
 
     std::chrono::system_clock::time_point stamp;
@@ -181,25 +191,27 @@ public:
     
     void receive_data(float q, float dq, float tau);
     void receive_data(float q, float dq, float tau, uint8_t err, float t_mos, float t_rotor);
+    FeedbackSnapshot GetFeedback() const;
     
     DM_Motor_Type GetMotorType() const { return this->Motor_Type; }
-    Control_Mode  GetMotorMode() const { return this->mode; }
+    Control_Mode  GetMotorMode() const { std::lock_guard<std::mutex> lock(feedback_mutex_); return this->mode; }
     Limit_param get_limit_param() { return limit_param; }//获取电机限制参数
     uint16_t GetMasterId() const { return this->Master_id; }//获取反馈ID
     uint16_t GetCanId() const { return this->Can_id; }//获取电机CAN ID
-    float Get_Position() const { return this->state_q; }
-    float Get_Velocity() const { return this->state_dq; }
-    float Get_tau() const { return this->state_tau; }
-    uint8_t Get_ERR() const { return this->state_err; }
-    float Get_T_MOS() const { return this->state_t_mos; }
-    float Get_T_Rotor() const { return this->state_t_rotor; }
+    float Get_Position() const { std::lock_guard<std::mutex> lock(feedback_mutex_); return this->state_q; }
+    float Get_Velocity() const { std::lock_guard<std::mutex> lock(feedback_mutex_); return this->state_dq; }
+    float Get_tau() const { std::lock_guard<std::mutex> lock(feedback_mutex_); return this->state_tau; }
+    uint8_t Get_ERR() const { std::lock_guard<std::mutex> lock(feedback_mutex_); return this->state_err; }
+    float Get_T_MOS() const { std::lock_guard<std::mutex> lock(feedback_mutex_); return this->state_t_mos; }
+    float Get_T_Rotor() const { std::lock_guard<std::mutex> lock(feedback_mutex_); return this->state_t_rotor; }
     // Seconds elapsed since the last motor feedback frame was received.
     // last_feedback_time_ is stamped only inside receive_data().
     double GetTimeSinceLastFeedback() const {
+        std::lock_guard<std::mutex> lock(feedback_mutex_);
         return std::chrono::duration<double>(
             std::chrono::steady_clock::now() - last_feedback_time_).count();
     }
-    void set_mode(Control_Mode value){ this->mode = value; }
+    void set_mode(Control_Mode value){ std::lock_guard<std::mutex> lock(feedback_mutex_); this->mode = value; }
     void set_param(int key, float value);
     void set_param(int key, uint32_t value);
     float get_param_as_float(int key) const;

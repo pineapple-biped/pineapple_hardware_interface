@@ -31,6 +31,7 @@ Motor::Motor(DM_Motor_Type motor_type, Control_Mode ctrl_mode,uint16_t can_id, u
 
 void Motor::updateTimeInterval() 
 {
+    std::lock_guard<std::mutex> lock(feedback_mutex_);
     auto now = std::chrono::steady_clock::now();
     std::chrono::duration<double> dt = now - last_time_;
     last_time_ = now;
@@ -40,12 +41,20 @@ void Motor::updateTimeInterval()
 
 double Motor::getTimeInterval() 
 {
+    std::lock_guard<std::mutex> lock(feedback_mutex_);
     return delta_time_;
 }
 
 
+FeedbackSnapshot Motor::GetFeedback() const
+{
+    std::lock_guard<std::mutex> lock(feedback_mutex_);
+    return {state_q, state_dq, state_tau, state_err, state_t_mos, state_t_rotor, feedback_sequence_};
+}
+
 void Motor::receive_data(float q, float dq, float tau)
 {
+    std::lock_guard<std::mutex> lock(feedback_mutex_);
     this->state_q = q;
     this->state_dq = dq;
     this->state_tau = tau;
@@ -53,6 +62,7 @@ void Motor::receive_data(float q, float dq, float tau)
 
 void Motor::receive_data(float q, float dq, float tau, uint8_t err, float t_mos, float t_rotor)
 {
+    std::lock_guard<std::mutex> lock(feedback_mutex_);
     this->state_q = q;
     this->state_dq = dq;
     this->state_tau = tau;
@@ -60,10 +70,12 @@ void Motor::receive_data(float q, float dq, float tau, uint8_t err, float t_mos,
     this->state_t_mos = t_mos;
     this->state_t_rotor = t_rotor;
     this->last_feedback_time_ = std::chrono::steady_clock::now();
+    ++feedback_sequence_;
 }
 
 void Motor::set_param(int key, float value)
 {
+    std::lock_guard<std::mutex> lock(param_mutex_);
     ValueType v{};
     v.value.floatValue = value;
     v.isFloat = true;
@@ -72,6 +84,7 @@ void Motor::set_param(int key, float value)
 
 void Motor::set_param(int key, uint32_t value)
 {
+    std::lock_guard<std::mutex> lock(param_mutex_);
     ValueType v{};
     v.value.uint32Value = value;
     v.isFloat = false;
@@ -80,6 +93,7 @@ void Motor::set_param(int key, uint32_t value)
 
 float Motor::get_param_as_float(int key) const
 {
+    std::lock_guard<std::mutex> lock(param_mutex_);
     auto it = param_map.find(key);
     if (it != param_map.end())
     {
@@ -97,6 +111,7 @@ float Motor::get_param_as_float(int key) const
 
 uint32_t Motor::get_param_as_uint32(int key) const 
 {
+    std::lock_guard<std::mutex> lock(param_mutex_);
     auto it = param_map.find(key);
     if (it != param_map.end()) {
         if (!it->second.isFloat) {
@@ -112,6 +127,7 @@ uint32_t Motor::get_param_as_uint32(int key) const
 
 bool Motor::is_have_param(int key) const
 {
+    std::lock_guard<std::mutex> lock(param_mutex_);
     return param_map.find(key) != param_map.end();
 }
 
@@ -145,6 +161,7 @@ Motor_Control::~Motor_Control()
     std::cout<<"Enter ~Motor_Control"<<std::endl;
    
     disable_all();//使能该接口下的所有电机
+    usb_hw.reset();
 }
 
 /**
@@ -495,7 +512,9 @@ void Motor_Control::changeMotorLimit(Motor &DM_Motor,float P_MAX,float Q_MAX,flo
 }
 
 void Motor_Control::canframeCallback(can_value_type& value)
-{   
+{
+    if (value.head.dlc != 8) return;
+
     static auto uint_to_float = [](uint16_t x, float xmin, float xmax, uint8_t bits) -> float {
         float span = xmax - xmin;
         float data_norm = float(x) / ((1 << bits) - 1);

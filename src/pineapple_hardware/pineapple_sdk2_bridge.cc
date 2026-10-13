@@ -154,17 +154,17 @@ void PineappleSdk2Bridge::PublishLowStateGo()
     for (uint16_t i = 0;i < num_motor_; i++)
     {
         auto motor = CtrlOf(i)->getMotor(can_id_list[i]);
-        int motor_type = motor->GetMotorMode();
-        double pos = motor->Get_Position();
-        double vel = motor->Get_Velocity();
-        double tau = motor->Get_tau();
-        uint8_t err = motor->Get_ERR();
+        const auto feedback = motor->GetFeedback();
+        double pos = feedback.q;
+        double vel = feedback.dq;
+        double tau = feedback.tau;
+        uint8_t err = feedback.error;
 
         low_state_go_.motor_state()[i].q() = (pos - motor_offset[i]) * direction[i];
         low_state_go_.motor_state()[i].dq() = vel * direction[i];
         low_state_go_.motor_state()[i].tau_est() = tau * direction[i];
         low_state_go_.motor_state()[i].mode() = err;
-        low_state_go_.motor_state()[i].temperature() = static_cast<uint8_t>(motor->Get_T_MOS());
+        low_state_go_.motor_state()[i].temperature() = static_cast<uint8_t>(feedback.t_mos);
 
         if (!IsMotorConnected(i)) {
             auto now = std::chrono::steady_clock::now();

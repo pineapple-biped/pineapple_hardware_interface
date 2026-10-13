@@ -14,6 +14,7 @@ pkg_check_modules(LIBUSB REQUIRED libusb-1.0)
 
 add_library(motor STATIC
     src/canfd/damiao.cpp 
+    src/canfd/usb_rx_fix.cpp
 )
 target_include_directories(motor PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/canfd/include
@@ -22,18 +23,22 @@ target_include_directories(motor PUBLIC
 
 # Select proper library based on architecture
 if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "aarch64")
-    target_link_libraries(motor PRIVATE
-    Threads::Threads
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/canfd/lib/arm/libu2canfd.a
-    ${LIBUSB_LIBRARIES}
-)
+    set(ADAPTER_ARCH arm)
 else()
-    target_link_libraries(motor PRIVATE
-    Threads::Threads
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/canfd/lib/x86/libu2canfd.a
-    ${LIBUSB_LIBRARIES}
-)
+    set(ADAPTER_ARCH x86)
 endif()
+set(ADAPTER_VENDOR "${CMAKE_CURRENT_SOURCE_DIR}/src/canfd/lib/${ADAPTER_ARCH}/libu2canfd.a")
+set(ADAPTER_FIXED "${CMAKE_CURRENT_BINARY_DIR}/libu2canfd_rx_override.a")
+add_custom_command(OUTPUT "${ADAPTER_FIXED}"
+    COMMAND ${CMAKE_OBJCOPY}
+      --weaken-symbol=_ZN9usb_class15get_data_threadEv
+      --weaken-symbol=_ZN9usb_class14can_rev_threadEv
+      "${ADAPTER_VENDOR}" "${ADAPTER_FIXED}"
+    DEPENDS "${ADAPTER_VENDOR}" VERBATIM)
+add_custom_target(adapter_rx_archive DEPENDS "${ADAPTER_FIXED}")
+add_dependencies(motor adapter_rx_archive)
+target_link_libraries(motor PRIVATE Threads::Threads "${ADAPTER_FIXED}" ${LIBUSB_LIBRARIES})
+target_link_options(motor INTERFACE "LINKER:--undefined=_ZN9usb_class13receive_fixedEh")
 
 ## IMU setup
 include_directories(
