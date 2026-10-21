@@ -227,8 +227,8 @@ void PineappleSdk2Bridge::InitXsensIMU()
     if (xsens_device->deviceId().isVru() || xsens_device->deviceId().isAhrs())
 	{
 		configArray.push_back(XsOutputConfiguration(XDI_Quaternion, 100));
-        configArray.push_back(XsOutputConfiguration(XDI_RateOfTurnHR, 1000));
-        configArray.push_back(XsOutputConfiguration(XDI_AccelerationHR, 1000));
+        configArray.push_back(XsOutputConfiguration(XDI_RateOfTurnHR, 100));
+        configArray.push_back(XsOutputConfiguration(XDI_AccelerationHR, 100));
 	}
     if (!xsens_device->setOutputConfiguration(configArray)) return;
     if (!xsens_device->gotoMeasurement()) return;
