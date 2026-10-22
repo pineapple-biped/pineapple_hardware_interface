@@ -12,6 +12,7 @@
 #include "../canfd/include/damiao.h"
 #include "../imu/xsens_imu.hpp"
 #include "../imu/configure_xsens.hpp"
+#include "motor_config.hpp"
 
 using namespace unitree::common;
 using namespace unitree::robot;
@@ -21,24 +22,6 @@ using namespace std;
 #define TOPIC_LOWCMD "rt/lowcmd"
 #define MOTOR_SENSOR_NUM 3
 #define NUM_MOTOR_IDL_GO 20
-
-struct MotorPosLimit {
-    double lower;
-    double upper;
-};
-
-// One platform = one USB2CANFD device (e.g. the wheel biped or the arm).
-struct MotorConfig {
-    string dev_sn;  // USB2CANFD serial number, from scan_canfd_sn
-    bool set_zero = false;
-    bool have_imu = false;  // bring up the Xsens MTi and publish its orientation
-    vector<uint16_t> can_id_list;
-    vector<uint16_t> mst_id_list;
-    vector<int> motor_type;
-    vector<double> motor_offset;
-    vector<double> direction;
-    vector<MotorPosLimit> pos_limit;
-};
 
 class PineappleSdk2Bridge
 {

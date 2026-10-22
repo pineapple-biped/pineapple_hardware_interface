@@ -2,7 +2,12 @@
 DDS hardware interface for CSL wheel-biped robot
 ## Overview
 ### Hardware
+Pineapple V2:
 - Joint motors: Damiao DM8006 DM8009P
+- Wheel motors: Damiao DM6006
+- IMU: Xsens Mti320
+Pineapple V3:
+- Joint motors: Damiao DM4340 DM4340P DM6248P
 - Wheel motors: Damiao DM6006
 - IMU: Xsens Mti320
 
@@ -10,13 +15,22 @@ DDS hardware interface for CSL wheel-biped robot
 - USB2CANFD firmware version (app v1.0.0.1)
 - Damiao motor firmware version (v3 or v4)
 - MTi-320 (IMU): verify the detected baud rate with `imu_probe` (tested V3: 2000000 baud). The interface configures quaternion, gyro and acceleration itself (100 Hz by default).
+- Damiao motors: check that every motor replies within 2 ms with `motor_probe` (see [Motor response check](#motor-response-check)).
 
 ## Build
 1. Follow this repo to install [unitree_sdk2](https://github.com/unitreerobotics/unitree_sdk2).
+    ```
+    git clone https://github.com/unitreerobotics/unitree_sdk2.git
+    sudo apt-get update
+    sudo apt-get install -y cmake g++ build-essential libyaml-cpp-dev libeigen3-dev libboost-all-dev libfmt-dev
+    mkdir build
+    cd build
+    cmake .. -DCMAKE_INSTALL_PREFIX=/opt/unitree_robotics
+    sudo make install
+    ```
 2. Set up IMU lib
     ```
-    cd ~/pineapple_hardware_interface/src/xspublic
-    make clean
+    cd ~/pineapple_hardware_interface/xspublic
     make
     sudo usermod -G dialout -a $USER
     ```
@@ -137,36 +151,43 @@ the IMU (see the latency section above) and start it again.
 `imu_probe --measure` runs the same check ten times without touching the motors.
 Stop the hardware interface first so only one process owns the IMU.
 
-## IMU output profiles
+## Motor response check
 
-`PINEAPPLE_IMU_PROFILE` selects the IMU output rates (quaternion/gyro/acceleration):
+`motor_probe --measure` measures how long each Damiao motor takes to answer a
+command. It enables the motors in one config, sends each motor a zero-torque MIT
+command (`kp=0 kd=0 tau=0`) and waits for its feedback frame, one motor after
+another, every 2 ms for 10 seconds. The motors are disabled when it finishes or on
+Ctrl+C.
 
-| Profile | Rates (Hz) | Minimum baud |
-|---|---|---|
-| `baseline` (default) | 100/100/100 | 115200 |
-| `fast` | 100/1000/1000 | 2000000 |
-| `fast500` | 100/500/500 | 2000000 |
-| `fast250` | 100/250/250 | 2000000 |
-
-The interface refuses a profile the detected baud rate cannot carry and never
-changes the baud rate itself. Pass the same variable to the probe and the
-interface:
+The joints go limp while it runs, so hang the robot up or support it first. Stop
+the hardware interface too, because only one process can own the USB2CANFD.
 
 ```sh
-sudo env PINEAPPLE_IMU_PROFILE=fast ./build/imu_probe --measure
-sudo env PINEAPPLE_IMU_PROFILE=fast ./build/pineapple_hardware_interface ../config/config_v3.yaml
+cd ~/pineapple_hardware_interface/build
+sudo ./motor_probe --measure ../config/config_v3.yaml
 ```
 
-## USB receive fix
+It prints one line per second, then a table per motor:
 
-The vendor USB2CANFD library discards bytes that libusb returns together with a
-timeout. The interface replaces its two receive threads with a loop that keeps
-those bytes, carries incomplete packets across reads and checks each packet's
-length, CRC and tail before decoding. CMake builds a local copy of the vendor
-archive with only those two symbols weakened; the original archives are not
-modified. On clean shutdown each endpoint prints a `USB_RX_FIXED` line with
-`partial_timeouts`, `recovered_bytes`, `frames`, `rejected_bytes` and
-`pending_bytes`. This fix has not yet been validated on hardware.
+```
+[motor] t=1s rtt_ms mean=... max=... cycle_ms max=... lost=0
+...
+idx can_id type         sent  lost   min_ms  mean_ms   p50_ms   p99_ms   max_ms err t_mos
+0   0x5    DM4340       ...
+bus cycle (8 motors) mean_ms=... p99_ms=... max_ms=...
+PASS (limit: no lost replies, max rtt < 2.0 ms)
+```
+
+- `rtt` is the time from sending the command to receiving that motor's feedback
+  frame.
+- `lost` counts commands with no reply within 10 ms.
+- `bus cycle` is the time to get replies from all motors in one round.
+- `err` and `t_mos` are the motor's last error code and MOS temperature.
+
+The probe reports `PASS` and exits 0 when no reply is lost and every motor's max
+rtt is under 2 ms, the interface's loop period. Otherwise the failing motors are
+marked `FAIL` and it exits 1.
+
 
 ## Useage
 

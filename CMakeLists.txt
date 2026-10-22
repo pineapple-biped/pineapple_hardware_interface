@@ -92,3 +92,6 @@ target_link_libraries(example_mti_receive_data ${XSENS_OBJ_LIBS})
 
 add_executable(imu_probe src/test/imu_probe.cpp)
 target_link_libraries(imu_probe ${XSENS_OBJ_LIBS} pthread)
+
+add_executable(motor_probe src/test/motor_probe.cpp)
+target_link_libraries(motor_probe motor yaml-cpp pthread)
