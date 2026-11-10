@@ -88,7 +88,15 @@ public:
     // the targets. Repeating stops cmd_timeout_sec_ after the last LowCmd_, which leaves
     // the motors exactly as the legacy path does when the deploy stops publishing.
     void ControlLoop();
+    bool AllMotorsReplied(const vector<uint64_t> &seq_before) const;
+    double ProcessCpuPercent();
     int cmd_repeat_hz_ = 0;
+    int rt_priority_ = 0;                  // PINEAPPLE_CTRL_RT_PRIORITY; 0 = normal scheduling
+    std::mutex reply_mutex_;               // pairs with reply_cv_ (motor reply wake-ups)
+    std::condition_variable reply_cv_;
+    double cpu_stat_proc_ = 0;
+    std::chrono::steady_clock::time_point cpu_stat_wall_{};
+    uint64_t legacy_publish_count_ = 0;
     double cmd_timeout_sec_ = 0.05;
     double reply_wait_sec_ = 0.0;          // set from the period in the constructor
     std::thread control_thread_;

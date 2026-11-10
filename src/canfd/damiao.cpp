@@ -558,6 +558,10 @@ void Motor_Control::canframeCallback(can_value_type& value)
         float t_mos = static_cast<float>(value.data[6]);
         float t_rotor = static_cast<float>(value.data[7]);
         m->receive_data(receive_q, receive_dq, receive_tau, err, t_mos, t_rotor);
+        {
+            std::lock_guard<std::mutex> lock(listener_mutex_);
+            if (feedback_listener_) feedback_listener_();
+        }
 
         m->updateTimeInterval();
        

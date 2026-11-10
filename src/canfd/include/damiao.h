@@ -11,6 +11,7 @@
 #include <cmath>
 #include <thread>
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <signal.h>
 #include <iostream>
@@ -264,6 +265,14 @@ using duration = std::chrono::duration<double>;
     void changeMotorLimit(Motor &DM_Motor,float P_MAX,float Q_MAX,float T_MAX);//修改电机限制参数，这个修改的不是电机内部的寄存器参数，而是电机的限制参数
 
     void canframeCallback(can_value_type& value);
+
+    // Called on the USB receive thread after every motor feedback frame has been stored
+    // (after Motor::receive_data). Must be cheap and must not send on the bus.
+    void setFeedbackListener(std::function<void()> fn)
+    {
+        std::lock_guard<std::mutex> lock(listener_mutex_);
+        feedback_listener_ = std::move(fn);
+    }
     
     
     std::shared_ptr<Motor> getMotor(uint16_t id) const
@@ -312,6 +321,9 @@ using duration = std::chrono::duration<double>;
     std::shared_ptr<usb_class> usb_hw;
 
     std::atomic<bool> read_write_save{false} ;
+
+    std::mutex listener_mutex_;
+    std::function<void()> feedback_listener_;
     
 };
 

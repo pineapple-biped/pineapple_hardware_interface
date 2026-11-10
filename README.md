@@ -248,18 +248,21 @@ All are off by default; without them the interface behaves exactly as before.
 |---|---|
 | `PINEAPPLE_IMU_PROPAGATE=1` | Publish the IMU quaternion rolled forward with every gyro sample that arrives after it. Needs a profile whose gyro rate is above the quaternion rate (`fast500`, `fast250`, `fast`). The published orientation is then as fresh as the gyro (2 ms at 500 Hz) instead of up to 10 ms old. Propagation stops, and the last value is held, if no device quaternion arrives for 50 ms. |
 | `PINEAPPLE_IMU_QUAT_HZ=N` | Ask the device for quaternions at N Hz instead of the profile's 100. Startup fails with "Refusing unexpected configured IMU rate" if the device does not accept it. |
-| `PINEAPPLE_CMD_REPEAT_HZ=N` | Damiao motors only report state in reply to a command, so motor state is as old as the last lowcmd (the deploy sends at 200 Hz). With N > 0 one thread owns the CAN bus: it sends each new lowcmd as soon as it arrives, re-sends the newest targets at N Hz in between, and publishes lowstate as soon as all motors have replied. All 8 V3 motors share one bus, so start at 500 and check the `[ctrl]` line below before going higher. |
+| `PINEAPPLE_CMD_REPEAT_HZ=N` | Damiao motors only report state in reply to a command, so motor state is as old as the last lowcmd (the deploy sends at 200 Hz). With N > 0 one thread owns the CAN bus: it sends each new lowcmd as soon as it arrives, re-sends the newest targets at N Hz in between, and publishes lowstate at exactly N Hz, each time with the replies to the latest send. It sleeps until the motor replies wake it. All 8 V3 motors share one bus, so start at 500 and check the `[ctrl]` line below before going higher. |
+| `PINEAPPLE_CTRL_RT_PRIORITY=N` | With command repeat on: run the control thread as SCHED_FIFO priority N (needs sudo). Off by default; it can starve the deploy on a busy CPU. |
 | `PINEAPPLE_CMD_TIMEOUT_MS=50` | With command repeat on: stop re-sending this long after the last lowcmd. The motors then keep their last command and are polled at 50 Hz, as without repeat. |
 
 Every 5 s the command-repeat thread prints:
 
 ```
-[ctrl] send_hz=500 lowcmd_hz=200 send_to_all_replies_ms mean/max=0.9/1.4 cycles_missing_a_reply=0/2500
+[ctrl] publish_hz=500 send_hz=500 lowcmd_hz=200 send_to_all_replies_ms mean/max=0.9/1.4 cycles_missing_a_reply=0/2500 ctrl_thread_cpu=4% bridge_cpu=12%
 ```
 
 `send_to_all_replies_ms` is how long the bus takes to answer one round of commands. Keep
 it well under the period (2 ms at 500 Hz) and `cycles_missing_a_reply` near 0; otherwise
-lower the rate. With propagation on, the IMU startup line adds `propagation_hz` and
+lower the rate. `ctrl_thread_cpu` and `bridge_cpu` are % of one core (the whole bridge
+includes the IMU and USB threads); without command repeat the bridge prints only
+`[bridge] bridge_cpu=…%`. With propagation on, the IMU startup line adds `propagation_hz` and
 `propagation_err_deg_mean/max`, the angle between each propagated estimate and the device
 quaternion that replaces it (a few hundredths of a degree is normal).
 

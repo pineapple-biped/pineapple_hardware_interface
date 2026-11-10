@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <ctime>
 #include <pthread.h>
 #include <stdexcept>
 
@@ -67,6 +68,8 @@ PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_con
         throw std::runtime_error("PINEAPPLE_CMD_REPEAT_HZ must be 0 (off) .. 2000");
     if (const char *t = std::getenv("PINEAPPLE_CMD_TIMEOUT_MS"))
         cmd_timeout_sec_ = std::atof(t) / 1000.0;
+    if (const char *p = std::getenv("PINEAPPLE_CTRL_RT_PRIORITY"))
+        rt_priority_ = std::atoi(p);
     cmd_target_.resize(num_motor_);
 
     last_fault_recovery_time_.resize(num_motor_, std::chrono::steady_clock::now());
@@ -84,7 +87,8 @@ PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_con
         reply_wait_sec_ = 0.8 / cmd_repeat_hz_;
         std::cout << "[ctrl] command repeat " << cmd_repeat_hz_ << " Hz, lowstate published after "
                   << "motor replies (wait <= " << reply_wait_sec_ * 1000 << " ms), repeat stops "
-                  << cmd_timeout_sec_ * 1000 << " ms after the last lowcmd" << std::endl;
+                  << cmd_timeout_sec_ * 1000 << " ms after the last lowcmd, SCHED_FIFO "
+                  << (rt_priority_ > 0 ? std::to_string(rt_priority_) : std::string("off")) << std::endl;
         control_thread_ = std::thread(&PineappleSdk2Bridge::ControlLoop, this);
     } else {
         lowStatePuberThreadPtr = CreateRecurrentThreadEx("lowstate", UT_CPU_ID_NONE, 2000, &PineappleSdk2Bridge::PublishLowStateGo, this);
@@ -193,15 +197,34 @@ void PineappleSdk2Bridge::LowCmdGoHandler(const void *msg)
     ++lat_cmd_count_;
 }
 
+bool PineappleSdk2Bridge::AllMotorsReplied(const vector<uint64_t> &seq_before) const
+{
+    for (int i = 0; i < num_motor_; i++)
+    {
+        auto motor = CtrlOf(i)->getMotor(can_id_list[i]);
+        if (!IsMotorConnected(i) || motor->Get_ERR() > 1) continue;
+        if (motor->GetFeedback().sequence == seq_before[i]) return false;
+    }
+    return true;
+}
+
 void PineappleSdk2Bridge::ControlLoop()
 {
     using clock = std::chrono::steady_clock;
+    if (rt_priority_ > 0)
     {
         sched_param sp{};
-        sp.sched_priority = 80;
+        sp.sched_priority = rt_priority_;
         if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) != 0)
-            std::cerr << "[ctrl] could not set SCHED_FIFO 80 (run with sudo); using normal priority" << std::endl;
+            std::cerr << "[ctrl] could not set SCHED_FIFO " << rt_priority_ << " (run with sudo); using normal priority" << std::endl;
     }
+    // Wake this thread on every motor reply instead of polling for them.
+    for (auto &ctrl : motor_controls_)
+        ctrl->setFeedbackListener([this] {
+            { std::lock_guard<std::mutex> lock(reply_mutex_); }
+            reply_cv_.notify_one();
+        });
+
     const auto period = std::chrono::duration_cast<clock::duration>(
         std::chrono::duration<double>(1.0 / cmd_repeat_hz_));
     const auto reply_wait = std::chrono::duration_cast<clock::duration>(
@@ -212,12 +235,30 @@ void PineappleSdk2Bridge::ControlLoop()
     vector<JointCmd> target(num_motor_);
     vector<uint64_t> seq_before(num_motor_);
     bool repeating = false;
+    clock::time_point last_send{};
 
-    // Stats, printed every 5 s: sends, wait for all replies, cycles with a missing reply.
-    uint64_t stat_cycles = 0, stat_incomplete = 0, stat_fresh = 0;
+    // Send every target and wait (sleeping) until all motors have replied or the deadline.
+    auto send_and_wait = [&](clock::time_point start) {
+        for (int i = 0; i < num_motor_; i++)
+            seq_before[i] = CtrlOf(i)->getMotor(can_id_list[i])->GetFeedback().sequence;
+        for (int i = 0; i < num_motor_; i++)
+            SendJointCommand(i, target[i]);
+        last_send = clock::now();
+        std::unique_lock<std::mutex> lock(reply_mutex_);
+        return reply_cv_.wait_until(lock, start + reply_wait,
+                                    [&] { return AllMotorsReplied(seq_before); });
+    };
+
+    // Stats, printed every 5 s.
+    uint64_t stat_sends = 0, stat_incomplete = 0, stat_fresh = 0, stat_pub = 0;
     double stat_wait_sum = 0, stat_wait_max = 0;
     auto stat_start = clock::now();
+    timespec cpu0{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu0);
 
+    // Lowstate goes out on a fixed grid at cmd_repeat_hz_. A new lowcmd is sent the moment
+    // it arrives (off-grid, nothing published); the next grid tick then skips its repeat if
+    // that send was less than half a period ago and just publishes the replies.
     auto next = clock::now() + period;
     while (is_running)
     {
@@ -236,9 +277,7 @@ void PineappleSdk2Bridge::ControlLoop()
             state_tick = pending_state_tick_;
         }
         const auto start = clock::now();
-        // A new lowcmd restarts the schedule so repeats stay evenly spaced after it.
-        next = fresh ? start + period : next + period;
-        if (next < start) next = start + period;  // fell behind: do not burst to catch up
+        const bool on_grid = start >= next;
 
         if (valid != repeating) {
             std::cerr << (valid ? "[ctrl] lowcmd received: sending at "
@@ -247,63 +286,72 @@ void PineappleSdk2Bridge::ControlLoop()
             repeating = valid;
         }
 
-        if (valid)
+        if (valid && (fresh || start - last_send >= period / 2))
         {
-            for (int i = 0; i < num_motor_; i++)
-                seq_before[i] = CtrlOf(i)->getMotor(can_id_list[i])->GetFeedback().sequence;
-            for (int i = 0; i < num_motor_; i++)
-                SendJointCommand(i, target[i]);
+            const bool complete = send_and_wait(start);
             if (fresh)
             {
                 lat_cmd_entry_ = entry;
-                lat_cmd_exit_ = Mono32(clock::now());
+                lat_cmd_exit_ = Mono32(last_send);
                 lat_cmd_seq_ = seq;
                 lat_cmd_state_tick_ = state_tick;
                 ++lat_cmd_count_;
                 ++stat_fresh;
             }
-            // Publish as soon as every connected, fault-free motor has replied.
-            const auto deadline = start + reply_wait;
-            bool complete = false;
-            while (true)
-            {
-                complete = true;
-                for (int i = 0; i < num_motor_ && complete; i++)
-                {
-                    auto motor = CtrlOf(i)->getMotor(can_id_list[i]);
-                    if (!IsMotorConnected(i) || motor->Get_ERR() > 1) continue;
-                    complete = motor->GetFeedback().sequence != seq_before[i];
-                }
-                if (complete || clock::now() >= deadline) break;
-                std::this_thread::sleep_for(std::chrono::microseconds(20));
-            }
             const double wait_ms = std::chrono::duration<double, std::milli>(clock::now() - start).count();
-            ++stat_cycles;
+            ++stat_sends;
             stat_incomplete += !complete;
             stat_wait_sum += wait_ms;
             stat_wait_max = std::max(stat_wait_max, wait_ms);
         }
-        else
+        else if (!valid)
         {
             PollStaleMotors();
         }
 
+        if (!on_grid) continue;  // off-grid wake-up for a new lowcmd: sent, not published
+        next += period;
+        if (next < clock::now()) next = clock::now() + period;  // fell behind: no burst
         FillAndWriteLowState();
+        ++stat_pub;
 
         const double stat_elapsed = std::chrono::duration<double>(clock::now() - stat_start).count();
         if (stat_elapsed >= 5.0)
         {
-            if (stat_cycles)
-                std::cout << "[ctrl] send_hz=" << stat_cycles / stat_elapsed
-                          << " lowcmd_hz=" << stat_fresh / stat_elapsed
-                          << " send_to_all_replies_ms mean/max=" << stat_wait_sum / stat_cycles
-                          << "/" << stat_wait_max
-                          << " cycles_missing_a_reply=" << stat_incomplete << "/" << stat_cycles << std::endl;
-            stat_cycles = stat_incomplete = stat_fresh = 0;
+            timespec cpu1{};
+            clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu1);
+            const double thread_cpu = (cpu1.tv_sec - cpu0.tv_sec) + 1e-9 * (cpu1.tv_nsec - cpu0.tv_nsec);
+            std::cout << "[ctrl] publish_hz=" << stat_pub / stat_elapsed
+                      << " send_hz=" << stat_sends / stat_elapsed
+                      << " lowcmd_hz=" << stat_fresh / stat_elapsed
+                      << " send_to_all_replies_ms mean/max="
+                      << (stat_sends ? stat_wait_sum / stat_sends : 0) << "/" << stat_wait_max
+                      << " cycles_missing_a_reply=" << stat_incomplete << "/" << stat_sends
+                      << " ctrl_thread_cpu=" << 100 * thread_cpu / stat_elapsed << "%"
+                      << " bridge_cpu=" << ProcessCpuPercent() << "%" << std::endl;
+            stat_sends = stat_incomplete = stat_fresh = stat_pub = 0;
             stat_wait_sum = stat_wait_max = 0;
             stat_start = clock::now();
+            cpu0 = cpu1;
         }
     }
+    for (auto &ctrl : motor_controls_)
+        ctrl->setFeedbackListener(nullptr);
+}
+
+// Whole-process CPU use (all threads, % of one core) since the previous call.
+double PineappleSdk2Bridge::ProcessCpuPercent()
+{
+    timespec cpu{};
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu);
+    const auto now = std::chrono::steady_clock::now();
+    const double c = cpu.tv_sec + 1e-9 * cpu.tv_nsec;
+    double pct = 0;
+    if (cpu_stat_wall_.time_since_epoch().count() != 0)
+        pct = 100 * (c - cpu_stat_proc_) / std::chrono::duration<double>(now - cpu_stat_wall_).count();
+    cpu_stat_proc_ = c;
+    cpu_stat_wall_ = now;
+    return pct;
 }
 
 void PineappleSdk2Bridge::PollStaleMotors()
@@ -328,6 +376,8 @@ void PineappleSdk2Bridge::PublishLowStateGo()
     if (!is_running) return;
     PollStaleMotors();
     FillAndWriteLowState();
+    if (++legacy_publish_count_ % 2500 == 0)  // every 5 s at 500 Hz
+        std::cout << "[bridge] bridge_cpu=" << ProcessCpuPercent() << "%" << std::endl;
 }
 
 void PineappleSdk2Bridge::FillAndWriteLowState()
