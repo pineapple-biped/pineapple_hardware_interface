@@ -95,3 +95,8 @@ target_link_libraries(imu_probe ${XSENS_OBJ_LIBS} pthread)
 
 add_executable(motor_probe src/test/motor_probe.cpp)
 target_link_libraries(motor_probe motor yaml-cpp pthread)
+
+enable_testing()
+add_executable(test_imu_timing_override src/test/imu_timing_override.cpp)
+target_link_libraries(test_imu_timing_override ${XSENS_OBJ_LIBS} pthread)
+add_test(NAME imu_timing_override COMMAND test_imu_timing_override)

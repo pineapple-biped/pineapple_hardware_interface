@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <stdexcept>
 
-PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs)
+PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs,
+                                         bool skip_imu_timing_check)
+    : skip_imu_timing_check_(skip_imu_timing_check)
 {
     xsens_imu_data = std::make_shared<ImuSharedData>();
 
@@ -241,7 +243,11 @@ bool PineappleSdk2Bridge::InitXsensIMU()
         return false;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    if (!verifyImuDelivery(*xsens_imu_data, profile, 1.0)) {
+    if (skip_imu_timing_check_) {
+        std::cerr << "[imu] Startup timing check disabled for this run; "
+                     "valid quaternion and incoming fields are still required.\n";
+    }
+    if (!verifyImuDelivery(*xsens_imu_data, profile, 1.0, skip_imu_timing_check_)) {
         std::cerr << "IMU delivery check failed." << std::endl;
         return false;
     }

@@ -226,3 +226,16 @@ wheel first is the convention:
 sudo ./pineapple_hardware_interface ../config/config.yaml ../config/config_arm.yaml
 # joints 0-7 = wheel biped, joints 8-13 = arm
 ```
+
+### Testing buffered IMU delivery
+
+Pass `--skip-imu-timing-check` to the hardware interface for an intentional USB
+latency-timer experiment. This skips startup measured-rate, age, and gap thresholds.
+Device setup, configured-rate readback, incoming samples for all three fields,
+quaternion validity, and motor protections remain checked. The flag does not set
+USB latency or add a fixed delay. Omit it to restore normal timing checks.
+
+```sh
+PINEAPPLE_IMU_PROFILE=fast500 ./build/pineapple_hardware_interface \
+  --skip-imu-timing-check ./config/config_v3.yaml
+```

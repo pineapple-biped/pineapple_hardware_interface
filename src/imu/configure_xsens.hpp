@@ -48,7 +48,8 @@ inline bool configureXsens(XsDevice& device, const ImuOutputProfile& profile, Xs
     return device.gotoMeasurement();
 }
 
-inline bool verifyImuDelivery(ImuSharedData& data, const ImuOutputProfile& profile, double seconds)
+inline bool verifyImuDelivery(ImuSharedData& data, const ImuOutputProfile& profile, double seconds,
+                              bool skip_timing_check = false)
 {
     data.resetTimingStats();
     const auto before = data.load();
@@ -61,7 +62,10 @@ inline bool verifyImuDelivery(ImuSharedData& data, const ImuOutputProfile& profi
     for (size_t i = 0; i < 3; ++i) {
         const double hz = (after.updates[i] - before.updates[i]) / (now - start);
         const double age_ms = after.received_at[i] > 0 ? 1000 * (now - after.received_at[i]) : -1;
-        healthy = healthy && imuDeliveryWindowHealthy(profile, i, hz, age_ms, after.max_field_gap_ms[i]);
+        healthy = healthy && after.updates[i] > before.updates[i];
+        if (!skip_timing_check)
+            healthy = healthy && imuDeliveryWindowHealthy(
+                profile, i, hz, age_ms, after.max_field_gap_ms[i]);
     }
     return healthy;
 }

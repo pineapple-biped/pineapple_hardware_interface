@@ -42,11 +42,19 @@ int main(int argc, char **argv)
     // Joint index order in LowCmd/LowState follows the argument order
     // (e.g. wheel biped config first -> joints 0-7, arm config second -> joints 8-13).
     std::vector<std::string> config_paths;
-    if (argc > 1)
-    {
-        for (int i = 1; i < argc; i++) config_paths.push_back(argv[i]);
+    bool skip_imu_timing_check = false;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--skip-imu-timing-check") {
+            skip_imu_timing_check = true;
+        } else if (arg.rfind("--", 0) == 0) {
+            std::cerr << "Unknown option: " << arg << std::endl;
+            return 1;
+        } else {
+            config_paths.push_back(arg);
+        }
     }
-    else
+    if (config_paths.empty())
     {
         config_paths.push_back("../config/config.yaml");
     }
@@ -78,7 +86,7 @@ int main(int argc, char **argv)
     ChannelFactory::Instance()->Init(config.domain_id, config.interface);
     std::unique_ptr<PineappleSdk2Bridge> pineapple_interface;
     try {
-        pineapple_interface = std::make_unique<PineappleSdk2Bridge>(platform_configs);
+        pineapple_interface = std::make_unique<PineappleSdk2Bridge>(platform_configs, skip_imu_timing_check);
     } catch (const std::exception &e) {
         std::cerr << e.what() << std::endl;
         return 1;
