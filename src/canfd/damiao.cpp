@@ -60,6 +60,7 @@ void Motor::receive_data(float q, float dq, float tau, uint8_t err, float t_mos,
     this->state_t_mos = t_mos;
     this->state_t_rotor = t_rotor;
     this->last_feedback_time_ = std::chrono::steady_clock::now();
+    ++this->feedback_count_;
 }
 
 void Motor::set_param(int key, float value)
@@ -331,9 +332,10 @@ void Motor_Control::control_mit(Motor &DM_Motor, float kp, float kd, float q, fl
     data[5]= kd_uint >> 4;
     data[6] = ((kd_uint & 0xf) << 4) | ((tau_uint >> 8) & 0xf);
     data[7] = tau_uint & 0xff;
-    
+
     std::vector<uint8_t> mydata = {data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]};
     usb_hw->fdcanFrameSend(mydata, can_id);
+    m->MarkCommandSent();  // latency instrumentation
 }
 
 void Motor_Control::control_pos_vel(Motor &DM_Motor,float pos,float vel)

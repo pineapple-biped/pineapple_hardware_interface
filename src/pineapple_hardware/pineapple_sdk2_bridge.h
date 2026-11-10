@@ -107,6 +107,26 @@ public:
     double poll_interval_sec_ = 0.02;    // actively solicit feedback at 50 Hz
 
     // IMU related
+    // ---- Latency instrumentation (see docs/latency_timestamps.md) ----
+    // Every stamp is CLOCK_MONOTONIC microseconds mod 2^32 ("mono32"), the clock Python's
+    // time.monotonic_ns() reads, so bridge, deploy and recorder times compare directly.
+    // Carried in LowState_ fields this bridge does not otherwise use: `tick`, each motor's
+    // `reserve[2]` / `lost`, and spare motor slots LAT_SLOT_A/B (only when num_motor_ leaves
+    // them free).
+    static constexpr int LAT_SLOT_A = 19;  // IMU stamps
+    static constexpr int LAT_SLOT_B = 18;  // lowcmd-handler stamps + deploy echoes
+    static uint32_t Mono32(std::chrono::steady_clock::time_point tp)
+    {
+        return static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(tp.time_since_epoch()).count());
+    }
+    static uint32_t Mono32Ns(int64_t ns) { return static_cast<uint32_t>(ns / 1000); }
+    std::atomic<uint32_t> lat_cmd_entry_{0};       // LowCmdGoHandler entered
+    std::atomic<uint32_t> lat_cmd_exit_{0};        // all MIT frames handed to USB
+    std::atomic<uint32_t> lat_cmd_seq_{0};         // echo of LowCmd_.reserve (deploy sequence)
+    std::atomic<uint32_t> lat_cmd_state_tick_{0};  // echo of the LowState tick the policy used
+    std::atomic<uint32_t> lat_cmd_count_{0};       // lowcmd messages handled
+
     std::thread xsens_imu_thread;
     std::shared_ptr<ImuSharedData> xsens_imu_data;
     XsControl* xsens_control = nullptr;

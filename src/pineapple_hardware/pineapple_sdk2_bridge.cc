@@ -91,6 +91,7 @@ void PineappleSdk2Bridge::SetMotorToZero()
 void PineappleSdk2Bridge::LowCmdGoHandler(const void *msg)
 {
     if (!is_running) return;
+    const uint32_t entry_us = Mono32(std::chrono::steady_clock::now());
     const unitree_go::msg::dds_::LowCmd_ *cmd = (const unitree_go::msg::dds_::LowCmd_ *)msg;
     for (int i = 0; i < num_motor_; i++)
     {
@@ -121,6 +122,14 @@ void PineappleSdk2Bridge::LowCmdGoHandler(const void *msg)
         CtrlOf(i)->control_mit(*motor, cmd->motor_cmd()[i].kp(), cmd->motor_cmd()[i].kd(),
                                                             cmd_q, cmd_dq, cmd_tau);
     }
+    // Latency instrumentation: handler entry/exit, and echoes of the deploy's stamps
+    // (LowCmd_.reserve = deploy sequence; spare slot reserve[0] = LowState tick it used).
+    lat_cmd_entry_ = entry_us;
+    lat_cmd_exit_ = Mono32(std::chrono::steady_clock::now());
+    lat_cmd_seq_ = cmd->reserve();
+    if (num_motor_ <= LAT_SLOT_B)
+        lat_cmd_state_tick_ = cmd->motor_cmd()[LAT_SLOT_B].reserve()[0];
+    ++lat_cmd_count_;
 }
 
 void PineappleSdk2Bridge::PublishLowStateGo()
@@ -160,6 +169,10 @@ void PineappleSdk2Bridge::PublishLowStateGo()
         low_state_go_.motor_state()[i].tau_est() = tau * direction[i];
         low_state_go_.motor_state()[i].mode() = err;
         low_state_go_.motor_state()[i].temperature() = static_cast<uint8_t>(motor->Get_T_MOS());
+        // Latency instrumentation: when this motor's state was received / last commanded.
+        low_state_go_.motor_state()[i].reserve()[0] = Mono32(motor->GetLastFeedbackTime());
+        low_state_go_.motor_state()[i].reserve()[1] = Mono32(motor->GetLastCommandTime());
+        low_state_go_.motor_state()[i].lost() = motor->GetFeedbackCount();
 
         if (!IsMotorConnected(i)) {
             auto now = std::chrono::steady_clock::now();
@@ -192,6 +205,21 @@ void PineappleSdk2Bridge::PublishLowStateGo()
         low_state_go_.imu_state().accelerometer()[1] = xsens_imu_data->accel[1];
         low_state_go_.imu_state().accelerometer()[2] = xsens_imu_data->accel[2];
     }
+    // Latency instrumentation (docs/latency_timestamps.md). Spare slots only.
+    if (num_motor_ <= LAT_SLOT_B)
+    {
+        auto &a = low_state_go_.motor_state()[LAT_SLOT_A];
+        a.reserve()[0] = Mono32Ns(xsens_imu_data->quat_rx_ns.load());
+        a.reserve()[1] = Mono32Ns(xsens_imu_data->gyro_rx_ns.load());
+        a.lost() = xsens_imu_data->quat_sample_time_fine.load();
+        auto &b = low_state_go_.motor_state()[LAT_SLOT_B];
+        b.reserve()[0] = lat_cmd_entry_.load();
+        b.reserve()[1] = lat_cmd_exit_.load();
+        b.lost() = lat_cmd_seq_.load();
+        b.mode() = static_cast<uint8_t>(lat_cmd_count_.load() & 0xFF);  // lowcmd counter (mod 256)
+        low_state_go_.reserve() = lat_cmd_state_tick_.load();
+    }
+    low_state_go_.tick() = Mono32(std::chrono::steady_clock::now());
     low_state_go_puber_->Write(low_state_go_);
 
 }
@@ -243,10 +271,16 @@ void PineappleSdk2Bridge::ProcessXsensData()
 {
     
     while (is_running) {
-        if (xsens_callback.packetAvailable()) {         
-            XsDataPacket packet = xsens_callback.getNextPacket();
+        if (xsens_callback.packetAvailable()) {
+            int64_t arrival_ns = 0;
+            XsDataPacket packet = xsens_callback.getNextPacket(&arrival_ns);
 
             if (packet.containsOrientation()) {
+                xsens_imu_data->quat_rx_ns = arrival_ns;
+                if (packet.containsSampleTimeFine())
+                    xsens_imu_data->quat_sample_time_fine = packet.sampleTimeFine();
+                if (packet.containsPacketCounter())
+                    xsens_imu_data->quat_packet_counter = packet.packetCounter();
                 XsQuaternion q = packet.orientationQuaternion();
                 xsens_imu_data->quaternion[0] = q.w();
                 xsens_imu_data->quaternion[1] = q.x();
@@ -258,6 +292,7 @@ void PineappleSdk2Bridge::ProcessXsensData()
                 xsens_imu_data->rpy[2] = euler.yaw();
             }
             if (packet.containsRateOfTurnHR()) {
+                xsens_imu_data->gyro_rx_ns = arrival_ns;
                 XsVector gyr_hr = packet.rateOfTurnHR();
                 for (int i = 0; i < 3; ++i) {
                     xsens_imu_data->gyro[i] = gyr_hr[i];

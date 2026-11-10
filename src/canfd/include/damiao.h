@@ -152,6 +152,10 @@ private:
     float state_t_mos=0.0f;
     float state_t_rotor=0.0f;
     std::chrono::steady_clock::time_point last_feedback_time_;
+    // Latency instrumentation: when the last MIT command frame for this motor left the
+    // host, and how many feedback frames it has returned (a new value = a fresh reply).
+    std::chrono::steady_clock::time_point last_cmd_time_;
+    uint32_t feedback_count_ = 0;
     Limit_param limit_param{};
     DM_Motor_Type Motor_Type;
     Control_Mode mode;
@@ -199,6 +203,10 @@ public:
         return std::chrono::duration<double>(
             std::chrono::steady_clock::now() - last_feedback_time_).count();
     }
+    std::chrono::steady_clock::time_point GetLastFeedbackTime() const { return last_feedback_time_; }
+    std::chrono::steady_clock::time_point GetLastCommandTime() const { return last_cmd_time_; }
+    uint32_t GetFeedbackCount() const { return feedback_count_; }
+    void MarkCommandSent() { last_cmd_time_ = std::chrono::steady_clock::now(); }
     void set_mode(Control_Mode value){ this->mode = value; }
     void set_param(int key, float value);
     void set_param(int key, uint32_t value);

@@ -13,6 +13,9 @@
 #include <chrono>
 #include <thread>
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <mutex>
 
 struct ImuSharedData {
@@ -21,6 +24,13 @@ struct ImuSharedData {
     std::array<double, 3> gyro = {0, 0, 0};
     std::array<double, 3> accel = {0, 0, 0};
     // std::mutex mtx;
+    // Latency instrumentation: host steady_clock (CLOCK_MONOTONIC) ns at which the SDK
+    // delivered the packet carrying the current quaternion / gyro, and the device's own
+    // SampleTimeFine (10 kHz ticks) and packet counter for the current quaternion.
+    std::atomic<int64_t> quat_rx_ns{0};
+    std::atomic<int64_t> gyro_rx_ns{0};
+    std::atomic<uint32_t> quat_sample_time_fine{0};
+    std::atomic<uint32_t> quat_packet_counter{0};
 };
 
 // Journaller* gJournal = 0;
@@ -39,11 +49,14 @@ public:
         return m_numberOfPacketsInBuffer > 0;
     }
 
-    XsDataPacket getNextPacket()
+    // arrival_ns (optional): host steady_clock ns at which the SDK delivered this packet.
+    XsDataPacket getNextPacket(int64_t* arrival_ns = nullptr)
     {
         xsens::Lock locky(&m_mutex);
         XsDataPacket oldestPacket(m_packetBuffer.front());
         m_packetBuffer.pop_front();
+        if (arrival_ns) *arrival_ns = m_arrivalNs.front();
+        m_arrivalNs.pop_front();
         --m_numberOfPacketsInBuffer;
         return oldestPacket;
     }
@@ -51,11 +64,14 @@ public:
 protected:
     void onLiveDataAvailable(XsDevice*, const XsDataPacket* packet) override
     {
+        const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
         xsens::Lock locky(&m_mutex);
         if (!packet) return;
         while (m_numberOfPacketsInBuffer >= m_maxNumberOfPacketsInBuffer)
             (void)getNextPacket();
         m_packetBuffer.push_back(*packet);
+        m_arrivalNs.push_back(now_ns);
         ++m_numberOfPacketsInBuffer;
     }
 private:
@@ -63,6 +79,7 @@ private:
     size_t m_maxNumberOfPacketsInBuffer;
     size_t m_numberOfPacketsInBuffer;
     std::list<XsDataPacket> m_packetBuffer;
+    std::list<int64_t> m_arrivalNs;  // parallel to m_packetBuffer
 };
 
 // void imuThreadFunc(std::atomic<bool>& running, ImuSharedData* imuData)
