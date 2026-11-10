@@ -1,6 +1,8 @@
 #include "pineapple_sdk2_bridge.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <pthread.h>
 #include <stdexcept>
 
 PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs,
@@ -58,6 +60,14 @@ PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_con
         }
     }
     num_motor_ = can_id_list.size();
+    // Before the lowcmd subscriber exists: the handler reads both.
+    if (const char *hz = std::getenv("PINEAPPLE_CMD_REPEAT_HZ"))
+        cmd_repeat_hz_ = std::atoi(hz);
+    if (cmd_repeat_hz_ < 0 || cmd_repeat_hz_ > 2000)
+        throw std::runtime_error("PINEAPPLE_CMD_REPEAT_HZ must be 0 (off) .. 2000");
+    if (const char *t = std::getenv("PINEAPPLE_CMD_TIMEOUT_MS"))
+        cmd_timeout_sec_ = std::atof(t) / 1000.0;
+    cmd_target_.resize(num_motor_);
 
     last_fault_recovery_time_.resize(num_motor_, std::chrono::steady_clock::now());
     last_disconnect_log_time_.resize(num_motor_, std::chrono::steady_clock::now());
@@ -70,7 +80,15 @@ PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_con
 
     init_time_ = std::chrono::steady_clock::now();
     last_poll_time_ = init_time_;
-    lowStatePuberThreadPtr = CreateRecurrentThreadEx("lowstate", UT_CPU_ID_NONE, 2000, &PineappleSdk2Bridge::PublishLowStateGo, this);
+    if (cmd_repeat_hz_ > 0) {
+        reply_wait_sec_ = 0.8 / cmd_repeat_hz_;
+        std::cout << "[ctrl] command repeat " << cmd_repeat_hz_ << " Hz, lowstate published after "
+                  << "motor replies (wait <= " << reply_wait_sec_ * 1000 << " ms), repeat stops "
+                  << cmd_timeout_sec_ * 1000 << " ms after the last lowcmd" << std::endl;
+        control_thread_ = std::thread(&PineappleSdk2Bridge::ControlLoop, this);
+    } else {
+        lowStatePuberThreadPtr = CreateRecurrentThreadEx("lowstate", UT_CPU_ID_NONE, 2000, &PineappleSdk2Bridge::PublishLowStateGo, this);
+    }
 
 }
 
@@ -81,6 +99,11 @@ PineappleSdk2Bridge::~PineappleSdk2Bridge()
 
     if (low_cmd_go_suber_) {
         low_cmd_go_suber_->CloseChannel();
+    }
+
+    cmd_cv_.notify_all();
+    if (control_thread_.joinable()) {
+        control_thread_.join();
     }
 
     if (lowStatePuberThreadPtr) {
@@ -100,54 +123,191 @@ void PineappleSdk2Bridge::SetMotorToZero()
     }
 }
 
+void PineappleSdk2Bridge::SendJointCommand(int i, const JointCmd &c)
+{
+    auto motor = CtrlOf(i)->getMotor(can_id_list[i]);
+    uint8_t err = motor->Get_ERR();
+    if (err > 1) return;
+
+    double cur_pos = (motor->Get_Position() - motor_offset[i]) * direction[i];
+
+    // Only snap the command to the limit once both the current joint pos and
+    // the incoming cmd have reached the same side of the constraint, so cmds
+    // that move away from the limit are still passed through unclamped.
+    double joint_cmd_q = c.q;
+    if (cur_pos >= pos_limit_[i].upper && c.q >= pos_limit_[i].upper)
+    {
+        joint_cmd_q = pos_limit_[i].upper;
+    }
+    else if (cur_pos <= pos_limit_[i].lower && c.q <= pos_limit_[i].lower)
+    {
+        joint_cmd_q = pos_limit_[i].lower;
+    }
+
+    double cmd_q = joint_cmd_q * direction[i] + motor_offset[i];
+    double cmd_dq = c.dq * direction[i];
+    double cmd_tau = c.tau * direction[i];
+
+    CtrlOf(i)->control_mit(*motor, c.kp, c.kd, cmd_q, cmd_dq, cmd_tau);
+}
+
 void PineappleSdk2Bridge::LowCmdGoHandler(const void *msg)
 {
     if (!is_running) return;
     const uint32_t entry_us = Mono32(std::chrono::steady_clock::now());
     const unitree_go::msg::dds_::LowCmd_ *cmd = (const unitree_go::msg::dds_::LowCmd_ *)msg;
+    const uint32_t state_tick = num_motor_ <= LAT_SLOT_B ? cmd->motor_cmd()[LAT_SLOT_B].reserve()[0] : 0;
+
+    if (cmd_repeat_hz_ > 0)
+    {
+        // Store only; the control thread sends it (now, then repeatedly) and stamps exit.
+        {
+            std::lock_guard<std::mutex> lock(cmd_mutex_);
+            for (int i = 0; i < num_motor_; i++)
+            {
+                const auto &m = cmd->motor_cmd()[i];
+                cmd_target_[i] = JointCmd{m.kp(), m.kd(), m.q(), m.dq(), m.tau()};
+            }
+            cmd_valid_ = true;
+            cmd_fresh_ = true;
+            cmd_received_ = std::chrono::steady_clock::now();
+            pending_entry_ = entry_us;
+            pending_seq_ = cmd->reserve();
+            pending_state_tick_ = state_tick;
+        }
+        cmd_cv_.notify_one();
+        return;
+    }
+
     for (int i = 0; i < num_motor_; i++)
     {
-        auto motor = CtrlOf(i)->getMotor(can_id_list[i]);
-        uint8_t err = motor->Get_ERR();
-        if (err > 1) continue;
-
-        double raw_cmd_q = cmd->motor_cmd()[i].q();
-        double cur_pos = (motor->Get_Position() - motor_offset[i]) * direction[i];
-
-        // Only snap the command to the limit once both the current joint pos and
-        // the incoming cmd have reached the same side of the constraint, so cmds
-        // that move away from the limit are still passed through unclamped.
-        double joint_cmd_q = raw_cmd_q;
-        if (cur_pos >= pos_limit_[i].upper && raw_cmd_q >= pos_limit_[i].upper)
-        {
-            joint_cmd_q = pos_limit_[i].upper;
-        }
-        else if (cur_pos <= pos_limit_[i].lower && raw_cmd_q <= pos_limit_[i].lower)
-        {
-            joint_cmd_q = pos_limit_[i].lower;
-        }
-
-        double cmd_q = joint_cmd_q * direction[i] + motor_offset[i];
-        double cmd_dq = cmd->motor_cmd()[i].dq() * direction[i];
-        double cmd_tau = cmd->motor_cmd()[i].tau() * direction[i];
-
-        CtrlOf(i)->control_mit(*motor, cmd->motor_cmd()[i].kp(), cmd->motor_cmd()[i].kd(),
-                                                            cmd_q, cmd_dq, cmd_tau);
+        const auto &m = cmd->motor_cmd()[i];
+        SendJointCommand(i, JointCmd{m.kp(), m.kd(), m.q(), m.dq(), m.tau()});
     }
     // Latency instrumentation: handler entry/exit, and echoes of the deploy's stamps
     // (LowCmd_.reserve = deploy sequence; spare slot reserve[0] = LowState tick it used).
     lat_cmd_entry_ = entry_us;
     lat_cmd_exit_ = Mono32(std::chrono::steady_clock::now());
     lat_cmd_seq_ = cmd->reserve();
-    if (num_motor_ <= LAT_SLOT_B)
-        lat_cmd_state_tick_ = cmd->motor_cmd()[LAT_SLOT_B].reserve()[0];
+    lat_cmd_state_tick_ = state_tick;
     ++lat_cmd_count_;
 }
 
-void PineappleSdk2Bridge::PublishLowStateGo()
+void PineappleSdk2Bridge::ControlLoop()
 {
-    if (!is_running) return;
+    using clock = std::chrono::steady_clock;
+    {
+        sched_param sp{};
+        sp.sched_priority = 80;
+        if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) != 0)
+            std::cerr << "[ctrl] could not set SCHED_FIFO 80 (run with sudo); using normal priority" << std::endl;
+    }
+    const auto period = std::chrono::duration_cast<clock::duration>(
+        std::chrono::duration<double>(1.0 / cmd_repeat_hz_));
+    const auto reply_wait = std::chrono::duration_cast<clock::duration>(
+        std::chrono::duration<double>(reply_wait_sec_));
+    const auto timeout = std::chrono::duration_cast<clock::duration>(
+        std::chrono::duration<double>(cmd_timeout_sec_));
 
+    vector<JointCmd> target(num_motor_);
+    vector<uint64_t> seq_before(num_motor_);
+    bool repeating = false;
+
+    // Stats, printed every 5 s: sends, wait for all replies, cycles with a missing reply.
+    uint64_t stat_cycles = 0, stat_incomplete = 0, stat_fresh = 0;
+    double stat_wait_sum = 0, stat_wait_max = 0;
+    auto stat_start = clock::now();
+
+    auto next = clock::now() + period;
+    while (is_running)
+    {
+        bool fresh = false, valid = false;
+        uint32_t entry = 0, seq = 0, state_tick = 0;
+        {
+            std::unique_lock<std::mutex> lock(cmd_mutex_);
+            cmd_cv_.wait_until(lock, next, [this] { return cmd_fresh_ || !is_running; });
+            if (!is_running) break;
+            fresh = cmd_fresh_;
+            cmd_fresh_ = false;
+            valid = cmd_valid_ && clock::now() - cmd_received_ < timeout;
+            if (valid) target = cmd_target_;
+            entry = pending_entry_;
+            seq = pending_seq_;
+            state_tick = pending_state_tick_;
+        }
+        const auto start = clock::now();
+        // A new lowcmd restarts the schedule so repeats stay evenly spaced after it.
+        next = fresh ? start + period : next + period;
+        if (next < start) next = start + period;  // fell behind: do not burst to catch up
+
+        if (valid != repeating) {
+            std::cerr << (valid ? "[ctrl] lowcmd received: sending at "
+                                : "[ctrl] no lowcmd for timeout: stopped repeating, polling at ")
+                      << (valid ? cmd_repeat_hz_ : static_cast<int>(1 / poll_interval_sec_)) << " Hz" << std::endl;
+            repeating = valid;
+        }
+
+        if (valid)
+        {
+            for (int i = 0; i < num_motor_; i++)
+                seq_before[i] = CtrlOf(i)->getMotor(can_id_list[i])->GetFeedback().sequence;
+            for (int i = 0; i < num_motor_; i++)
+                SendJointCommand(i, target[i]);
+            if (fresh)
+            {
+                lat_cmd_entry_ = entry;
+                lat_cmd_exit_ = Mono32(clock::now());
+                lat_cmd_seq_ = seq;
+                lat_cmd_state_tick_ = state_tick;
+                ++lat_cmd_count_;
+                ++stat_fresh;
+            }
+            // Publish as soon as every connected, fault-free motor has replied.
+            const auto deadline = start + reply_wait;
+            bool complete = false;
+            while (true)
+            {
+                complete = true;
+                for (int i = 0; i < num_motor_ && complete; i++)
+                {
+                    auto motor = CtrlOf(i)->getMotor(can_id_list[i]);
+                    if (!IsMotorConnected(i) || motor->Get_ERR() > 1) continue;
+                    complete = motor->GetFeedback().sequence != seq_before[i];
+                }
+                if (complete || clock::now() >= deadline) break;
+                std::this_thread::sleep_for(std::chrono::microseconds(20));
+            }
+            const double wait_ms = std::chrono::duration<double, std::milli>(clock::now() - start).count();
+            ++stat_cycles;
+            stat_incomplete += !complete;
+            stat_wait_sum += wait_ms;
+            stat_wait_max = std::max(stat_wait_max, wait_ms);
+        }
+        else
+        {
+            PollStaleMotors();
+        }
+
+        FillAndWriteLowState();
+
+        const double stat_elapsed = std::chrono::duration<double>(clock::now() - stat_start).count();
+        if (stat_elapsed >= 5.0)
+        {
+            if (stat_cycles)
+                std::cout << "[ctrl] send_hz=" << stat_cycles / stat_elapsed
+                          << " lowcmd_hz=" << stat_fresh / stat_elapsed
+                          << " send_to_all_replies_ms mean/max=" << stat_wait_sum / stat_cycles
+                          << "/" << stat_wait_max
+                          << " cycles_missing_a_reply=" << stat_incomplete << "/" << stat_cycles << std::endl;
+            stat_cycles = stat_incomplete = stat_fresh = 0;
+            stat_wait_sum = stat_wait_max = 0;
+            stat_start = clock::now();
+        }
+    }
+}
+
+void PineappleSdk2Bridge::PollStaleMotors()
+{
     auto poll_now = std::chrono::steady_clock::now();
     if (std::chrono::duration<double>(poll_now - last_poll_time_).count() >= poll_interval_sec_)
     {
@@ -161,7 +321,17 @@ void PineappleSdk2Bridge::PublishLowStateGo()
             }
         }
     }
+}
 
+void PineappleSdk2Bridge::PublishLowStateGo()
+{
+    if (!is_running) return;
+    PollStaleMotors();
+    FillAndWriteLowState();
+}
+
+void PineappleSdk2Bridge::FillAndWriteLowState()
+{
     for (uint16_t i = 0;i < num_motor_; i++)
     {
         auto motor = CtrlOf(i)->getMotor(can_id_list[i]);
@@ -205,7 +375,7 @@ void PineappleSdk2Bridge::PublishLowStateGo()
         const ImuSample imu = xsens_imu_data->load();
 
         for (int i = 0; i < 4; i++) {
-            low_state_go_.imu_state().quaternion()[i] = imu.quaternion[i];
+            low_state_go_.imu_state().quaternion()[i] = imu.quaternion_out[i];
         }
         for (int i = 0; i < 3; i++) {
             low_state_go_.imu_state().gyroscope()[i] = imu.gyro[i];
@@ -216,7 +386,7 @@ void PineappleSdk2Bridge::PublishLowStateGo()
         if (num_motor_ <= LAT_SLOT_B)
         {
             auto &a = low_state_go_.motor_state()[LAT_SLOT_A];
-            a.reserve()[0] = Mono32Seconds(imu.received_at[0]);
+            a.reserve()[0] = Mono32Seconds(imu.quaternion_out_at);  // == quaternion arrival unless propagating
             a.reserve()[1] = Mono32Seconds(imu.received_at[1]);
             a.lost() = imu.quat_sample_time_fine;
         }
@@ -269,6 +439,13 @@ bool PineappleSdk2Bridge::InitXsensIMU()
 
 	cout << "Device: " << xsens_device->productCode().toStdString() << ", with ID: " << xsens_device->deviceId().toString() << " opened." << endl;
 
+    const bool propagate = imuPropagateFromEnvironment();
+    if (propagate && profile.hz[1] <= profile.hz[0])
+        std::cerr << "[imu] PINEAPPLE_IMU_PROPAGATE=1 has no effect: gyro rate " << profile.hz[1]
+                  << " Hz is not above the quaternion rate " << profile.hz[0] << " Hz" << std::endl;
+    std::cout << "[imu] profile q/gyro/accel_hz=" << profile.hz[0] << "/" << profile.hz[1] << "/"
+              << profile.hz[2] << " propagate=" << (propagate ? "on" : "off") << std::endl;
+    xsens_imu_data->setPropagate(propagate);
     xsens_callback.setTarget(xsens_imu_data);
     xsens_device->addCallbackHandler(&xsens_callback);
     if (!configureXsens(*xsens_device, profile, xsens_mtPort.baudrate())) {

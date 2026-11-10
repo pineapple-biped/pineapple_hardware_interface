@@ -3,7 +3,10 @@
 
 #include <iostream>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <mutex>
+#include <thread>
 
 #include <unitree/robot/channel/channel_publisher.hpp>
 #include <unitree/robot/channel/channel_subscriber.hpp>
@@ -33,7 +36,8 @@ public:
     ~PineappleSdk2Bridge();
 
     void LowCmdGoHandler(const void *msg);
-    void PublishLowStateGo();
+    void PublishLowStateGo();   // legacy 500 Hz timer: poll, then publish
+
 
     // Motor related
     void SetMotorToZero();
@@ -68,6 +72,32 @@ public:
     private:
 
     bool skip_imu_timing_check_ = false;
+
+    // Joint-frame target for one motor, as received in LowCmd_.
+    struct JointCmd { double kp = 0, kd = 0, q = 0, dq = 0, tau = 0; };
+    // Clamp to the joint limits, convert to the motor frame and send one MIT frame.
+    void SendJointCommand(int i, const JointCmd &c);
+    void PollStaleMotors();     // solicit feedback from motors silent for poll_interval_sec_
+    void FillAndWriteLowState();
+
+    // ---- Command repeat (PINEAPPLE_CMD_REPEAT_HZ > 0) ----
+    // Damiao motors only report state in reply to a command, so the state age is set by
+    // the command rate. In this mode one control thread owns the CAN bus: it re-sends the
+    // newest LowCmd_ targets at cmd_repeat_hz_, sends a new LowCmd_ the moment it
+    // arrives, waits for the replies and then publishes LowState_. The handler only stores
+    // the targets. Repeating stops cmd_timeout_sec_ after the last LowCmd_, which leaves
+    // the motors exactly as the legacy path does when the deploy stops publishing.
+    void ControlLoop();
+    int cmd_repeat_hz_ = 0;
+    double cmd_timeout_sec_ = 0.05;
+    double reply_wait_sec_ = 0.0;          // set from the period in the constructor
+    std::thread control_thread_;
+    std::mutex cmd_mutex_;
+    std::condition_variable cmd_cv_;
+    vector<JointCmd> cmd_target_;          // guarded by cmd_mutex_
+    bool cmd_valid_ = false, cmd_fresh_ = false;
+    std::chrono::steady_clock::time_point cmd_received_;
+    uint32_t pending_entry_ = 0, pending_seq_ = 0, pending_state_tick_ = 0;
 
     void HandleMotorFault(int motor_idx);
     bool IsMotorConnected(int motor_idx) const;
