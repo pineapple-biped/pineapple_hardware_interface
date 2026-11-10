@@ -16,7 +16,9 @@ struct ImuOutputProfile {
 inline ImuOutputProfile imuOutputProfile(const std::string& name)
 {
     if (name == "baseline") return {{100, 100, 100}, {20, 20, 20}, 115200};
-    if (name == "fast") return {{100, 1000, 1000}, {20, 5, 5}, 2000000};
+    // gyro/accel gaps up to ~5 ms occur from host scheduling at 1 kHz (seen on V3); FTDI
+    // latency-timer buffering, what this check is for, shows as 16-50 ms gaps.
+    if (name == "fast") return {{100, 1000, 1000}, {20, 10, 10}, 2000000};
     if (name == "fast500") return {{100, 500, 500}, {20, 5, 5}, 2000000};
     if (name == "fast250") return {{100, 250, 250}, {20, 5, 5}, 2000000};
     throw std::invalid_argument(
