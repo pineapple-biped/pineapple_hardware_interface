@@ -236,6 +236,7 @@ void PineappleSdk2Bridge::ControlLoop()
     vector<uint64_t> seq_before(num_motor_);
     bool repeating = false;
     clock::time_point last_send{};
+    bool fresh_since_tick = false;
 
     // Send every target and wait (sleeping) until all motors have replied or the deadline.
     auto send_and_wait = [&](clock::time_point start) {
@@ -257,8 +258,9 @@ void PineappleSdk2Bridge::ControlLoop()
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu0);
 
     // Lowstate goes out on a fixed grid at cmd_repeat_hz_. A new lowcmd is sent the moment
-    // it arrives (off-grid, nothing published); the next grid tick then skips its repeat if
-    // that send was less than half a period ago and just publishes the replies.
+    // it arrives (off-grid, nothing published). A grid tick re-sends only if no new lowcmd
+    // went out since the previous tick, so the bus carries at most cmd_repeat_hz_ sends/s
+    // (one send of all motors takes ~1 ms over USB, so fresh + repeat could saturate it).
     auto next = clock::now() + period;
     while (is_running)
     {
@@ -286,7 +288,7 @@ void PineappleSdk2Bridge::ControlLoop()
             repeating = valid;
         }
 
-        if (valid && (fresh || start - last_send >= period / 2))
+        if (valid && (fresh || (on_grid && !fresh_since_tick)))
         {
             const bool complete = send_and_wait(start);
             if (fresh)
@@ -309,7 +311,11 @@ void PineappleSdk2Bridge::ControlLoop()
             PollStaleMotors();
         }
 
-        if (!on_grid) continue;  // off-grid wake-up for a new lowcmd: sent, not published
+        if (!on_grid) {  // off-grid wake-up for a new lowcmd: sent, not published
+            fresh_since_tick = fresh_since_tick || (valid && fresh);
+            continue;
+        }
+        fresh_since_tick = false;
         next += period;
         if (next < clock::now()) next = clock::now() + period;  // fell behind: no burst
         FillAndWriteLowState();
