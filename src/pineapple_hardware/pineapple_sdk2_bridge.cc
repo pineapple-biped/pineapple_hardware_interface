@@ -75,6 +75,8 @@ PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_con
     last_fault_recovery_time_.resize(num_motor_, std::chrono::steady_clock::now());
     last_disconnect_log_time_.resize(num_motor_, std::chrono::steady_clock::now());
 
+    // Nothing below may throw while the watchdog thread is running.
+    command_watchdog_thread_ = std::thread(&PineappleSdk2Bridge::WatchCommands, this);
     low_cmd_go_suber_.reset(new ChannelSubscriber<unitree_go::msg::dds_::LowCmd_>(TOPIC_LOWCMD));
     low_cmd_go_suber_->InitChannel(bind(&PineappleSdk2Bridge::LowCmdGoHandler, this, placeholders::_1), 1);
 
@@ -98,8 +100,13 @@ PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_con
 
 PineappleSdk2Bridge::~PineappleSdk2Bridge()
 {
-    is_running = false;
-
+    {
+        std::lock_guard<std::mutex> lock(motor_command_mutex_);
+        is_running = false;
+        command_watchdog_.Trip();
+        DisableMotorsLocked();
+    }
+    if (command_watchdog_thread_.joinable()) command_watchdog_thread_.join();
 
     if (low_cmd_go_suber_) {
         low_cmd_go_suber_->CloseChannel();
@@ -121,6 +128,8 @@ PineappleSdk2Bridge::~PineappleSdk2Bridge()
 
 void PineappleSdk2Bridge::SetMotorToZero()
 {
+    std::lock_guard<std::mutex> lock(motor_command_mutex_);
+    if (!is_running || command_watchdog_.Tripped()) return;
     for (int i = 0; i < num_motor_; i++)
     {
         CtrlOf(i)->set_zero_position(*CtrlOf(i)->getMotor(can_id_list[i]));
@@ -162,8 +171,26 @@ void PineappleSdk2Bridge::LowCmdGoHandler(const void *msg)
     const unitree_go::msg::dds_::LowCmd_ *cmd = (const unitree_go::msg::dds_::LowCmd_ *)msg;
     const uint32_t state_tick = num_motor_ <= LAT_SLOT_B ? cmd->motor_cmd()[LAT_SLOT_B].reserve()[0] : 0;
 
+    std::unique_lock<std::mutex> motor_lock(motor_command_mutex_);
+    if (!is_running || command_watchdog_.Tripped()) return;
+    // Validate the entire frame before applying any joint. Invalid commands latch off.
+    for (int i = 0; i < num_motor_; ++i) {
+        const auto &m = cmd->motor_cmd()[i];
+        if (!CommandWatchdog::Valid(m.q(), m.dq(), m.tau(), m.kp(), m.kd())) {
+            command_watchdog_.Trip();
+            DisableMotorsLocked();
+            std::cerr << "[watchdog] Invalid command; motors disabled. Restart bridge to rearm.\n";
+            return;
+        }
+    }
+    if (!command_watchdog_.Accept(CommandWatchdog::Clock::now())) {
+        DisableMotorsLocked();
+        return;
+    }
+
     if (cmd_repeat_hz_ > 0)
     {
+        motor_lock.unlock();  // the control thread takes it to send
         // Store only; the control thread sends it (now, then repeatedly) and stamps exit.
         {
             std::lock_guard<std::mutex> lock(cmd_mutex_);
@@ -239,15 +266,20 @@ void PineappleSdk2Bridge::ControlLoop()
     bool fresh_since_tick = false;
 
     // Send every target and wait (sleeping) until all motors have replied or the deadline.
-    auto send_and_wait = [&](clock::time_point start) {
-        for (int i = 0; i < num_motor_; i++)
-            seq_before[i] = CtrlOf(i)->getMotor(can_id_list[i])->GetFeedback().sequence;
-        for (int i = 0; i < num_motor_; i++)
-            SendJointCommand(i, target[i]);
-        last_send = clock::now();
+    // Returns -1 if nothing was sent (watchdog latched), else 1/0 for all replies in or not.
+    auto send_and_wait = [&](clock::time_point start) -> int {
+        {
+            std::lock_guard<std::mutex> motor_lock(motor_command_mutex_);
+            if (!is_running || command_watchdog_.Tripped()) return -1;
+            for (int i = 0; i < num_motor_; i++)
+                seq_before[i] = CtrlOf(i)->getMotor(can_id_list[i])->GetFeedback().sequence;
+            for (int i = 0; i < num_motor_; i++)
+                SendJointCommand(i, target[i]);
+            last_send = clock::now();
+        }
         std::unique_lock<std::mutex> lock(reply_mutex_);
         return reply_cv_.wait_until(lock, start + reply_wait,
-                                    [&] { return AllMotorsReplied(seq_before); });
+                                    [&] { return AllMotorsReplied(seq_before); }) ? 1 : 0;
     };
 
     // Stats, printed every 5 s.
@@ -288,9 +320,12 @@ void PineappleSdk2Bridge::ControlLoop()
             repeating = valid;
         }
 
+        int sent = -1;
         if (valid && (fresh || (on_grid && !fresh_since_tick)))
+            sent = send_and_wait(start);
+        if (sent >= 0)
         {
-            const bool complete = send_and_wait(start);
+            const bool complete = sent == 1;
             if (fresh)
             {
                 lat_cmd_entry_ = entry;
@@ -306,13 +341,13 @@ void PineappleSdk2Bridge::ControlLoop()
             stat_wait_sum += wait_ms;
             stat_wait_max = std::max(stat_wait_max, wait_ms);
         }
-        else if (!valid)
+        else if (!valid || sent < 0)
         {
-            PollStaleMotors();
+            PollStaleMotors();  // also keeps feedback flowing after a watchdog latch
         }
 
         if (!on_grid) {  // off-grid wake-up for a new lowcmd: sent, not published
-            fresh_since_tick = fresh_since_tick || (valid && fresh);
+            fresh_since_tick = fresh_since_tick || (sent >= 0 && fresh);
             continue;
         }
         fresh_since_tick = false;
@@ -365,6 +400,7 @@ void PineappleSdk2Bridge::PollStaleMotors()
     auto poll_now = std::chrono::steady_clock::now();
     if (std::chrono::duration<double>(poll_now - last_poll_time_).count() >= poll_interval_sec_)
     {
+        std::lock_guard<std::mutex> lock(motor_command_mutex_);
         last_poll_time_ = poll_now;
         for (int i = 0; i < num_motor_; i++)
         {
@@ -528,6 +564,8 @@ bool PineappleSdk2Bridge::IsMotorConnected(int motor_idx) const
 
 void PineappleSdk2Bridge::HandleMotorFault(int i)
 {
+    std::lock_guard<std::mutex> lock(motor_command_mutex_);
+    if (!is_running || command_watchdog_.Check(CommandWatchdog::Clock::now())) return;
     auto now = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(now - last_fault_recovery_time_[i]).count();
     if (elapsed < 2.0) {
@@ -555,3 +593,36 @@ void PineappleSdk2Bridge::CloseXsensIMU()
     xsens_control = nullptr;
 }
 
+
+// Called only while holding motor_command_mutex_. No feedback is needed to disable.
+void PineappleSdk2Bridge::DisableMotorsLocked()
+{
+    for (int i = 0; i < num_motor_; ++i) {
+        auto motor = CtrlOf(i)->getMotor(can_id_list[i]);
+        CtrlOf(i)->control_cmd(can_id_list[i] + motor->GetMotorMode(), 0xFD);
+    }
+}
+
+void PineappleSdk2Bridge::WatchCommands()
+{
+    bool reported = false;
+    auto last_disable = CommandWatchdog::Time::min();
+    while (is_running) {
+        {
+            std::lock_guard<std::mutex> lock(motor_command_mutex_);
+            const auto now = CommandWatchdog::Clock::now();
+            if (command_watchdog_.Check(now)) {
+                if (!reported) {
+                    std::cerr << "[watchdog] Stop latched (command timeout or invalid frame). "
+                              << "Motors disabled; restart bridge to rearm.\n";
+                }
+                if (!reported || now - last_disable >= std::chrono::milliseconds(20)) {
+                    DisableMotorsLocked();
+                    last_disable = now;
+                }
+                reported = true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+}

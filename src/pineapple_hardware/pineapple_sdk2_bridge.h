@@ -16,6 +16,7 @@
 #include "../imu/xsens_imu.hpp"
 #include "../imu/configure_xsens.hpp"
 #include "motor_config.hpp"
+#include "command_watchdog.h"
 
 using namespace unitree::common;
 using namespace unitree::robot;
@@ -108,6 +109,17 @@ public:
     uint32_t pending_entry_ = 0, pending_seq_ = 0, pending_state_tick_ = 0;
 
     void HandleMotorFault(int motor_idx);
+
+    // ---- Command watchdog (ported from fix/command-watchdog, 2deba74) ----
+    // After the first accepted lowcmd, 100 ms without another one (or an invalid frame)
+    // latches: motors are disabled (0xFD, re-sent every 20 ms) and no command is sent until
+    // the bridge restarts. motor_command_mutex_ serializes the watchdog and every motor
+    // command write (handler, command-repeat thread, polling, fault recovery).
+    void WatchCommands();
+    void DisableMotorsLocked();
+    std::mutex motor_command_mutex_;
+    CommandWatchdog command_watchdog_;
+    std::thread command_watchdog_thread_;
     bool IsMotorConnected(int motor_idx) const;
 
     // Controller owning the given global joint index (one CAN bus per device).

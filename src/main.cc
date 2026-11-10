@@ -25,11 +25,11 @@ struct RealRobotConfig
 
   } config;
 
-std::atomic<bool> running(true);
+// Async-signal-safe: no I/O in the handler. SIGTERM also shuts down (and disables motors).
+volatile std::sig_atomic_t running = 1;
 
-void signalHandler(int signum) {
-    running = false;
-    std::cerr << "\nInterrupt signal (" << signum << ") received.\n";
+void signalHandler(int) {
+    running = 0;
 }
 
 Journaller* gJournal = 0; // Xsens IMU related
@@ -37,6 +37,7 @@ Journaller* gJournal = 0; // Xsens IMU related
 int main(int argc, char **argv)
 {
     std::signal(SIGINT, signalHandler);
+    std::signal(SIGTERM, signalHandler);
 
     // Each config file describes one platform on its own USB2CANFD device.
     // Joint index order in LowCmd/LowState follows the argument order

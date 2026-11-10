@@ -240,6 +240,33 @@ PINEAPPLE_IMU_PROFILE=fast500 ./build/pineapple_hardware_interface \
   --skip-imu-timing-check ./config/config_v3.yaml
 ```
 
+### Command-timeout watchdog
+
+Ported from `fix/command-watchdog` (2deba74). After the first valid `rt/lowcmd`,
+**100 ms without another accepted frame** latches the bridge off: motors get CAN
+disable (`0xFD`), re-sent every 20 ms by a 2 ms watchdog thread, and no further
+command is sent. A frame with a nonfinite field or gains outside the MIT range
+(kp 0–500, kd 0–5) latches off before any joint in it is applied. Late frames
+cannot revive an expired session: **restart the bridge to rearm** (also after
+restarting the deploy, or switching controllers with a gap over 100 ms).
+SIGINT/SIGTERM shutdown disables the motors as well. The watchdog arms on the
+first command; it is not a startup interlock.
+
+With `PINEAPPLE_CMD_REPEAT_HZ`, the repeat stops after `PINEAPPLE_CMD_TIMEOUT_MS`
+(50 ms) and the watchdog then disables the motors at 100 ms; the watchdog watches
+incoming lowcmd, not the bridge's own resends.
+
+Not covered: a killed/frozen bridge, USB/CAN failure, host power loss, or a
+publisher stuck resending the same command. Those need the motors' own
+communication timeout (the driver's `TIMEOUT` register, not verified) and the
+e-stop.
+
+Acceptance test, once per build, base on the stand, wheels and legs clear:
+start the bridge and the deploy (or any bounded lowcmd publisher), let it hold a
+pose, then stop only the publisher. Expect `[watchdog] Stop latched` within
+~100 ms, motors limp, and they stay disabled when the publisher restarts. Stop it,
+restart the bridge, and check normal operation. Do not test while balancing.
+
 ### Low-latency options
 
 All are off by default; without them the interface behaves exactly as before.
