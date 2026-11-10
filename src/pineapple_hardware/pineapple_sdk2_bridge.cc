@@ -531,6 +531,7 @@ bool PineappleSdk2Bridge::InitXsensIMU()
 
 	cout << "Device: " << xsens_device->productCode().toStdString() << ", with ID: " << xsens_device->deviceId().toString() << " opened." << endl;
 
+    profile = imuProfileForLink(profile, xsens_mtPort.baudrate());
     const bool propagate = imuPropagateFromEnvironment();
     if (propagate && profile.hz[1] <= profile.hz[0])
         std::cerr << "[imu] PINEAPPLE_IMU_PROPAGATE=1 has no effect: gyro rate " << profile.hz[1]

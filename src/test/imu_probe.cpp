@@ -40,6 +40,7 @@ int main(int argc, char** argv)
     callback.setTarget(shared);
     device->addCallbackHandler(&callback);
     int result = 1;
+    profile = imuProfileForLink(profile, port.baudrate());
     if (configureXsens(*device, profile, port.baudrate())) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
         bool healthy = true;

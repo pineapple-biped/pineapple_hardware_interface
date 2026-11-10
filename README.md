@@ -14,7 +14,7 @@ Pineapple V3:
 ## Requirement
 - USB2CANFD firmware version (app v1.0.0.1)
 - Damiao motor firmware version (v3 or v4)
-- MTi-320 (IMU): verify the detected baud rate with `imu_probe` (tested V3: 2000000 baud). The interface configures quaternion, gyro and acceleration itself (100 Hz by default).
+- MTi-320 (IMU): verify the detected baud rate with `imu_probe` (tested V3: 2000000 baud). The interface configures quaternion, gyro and acceleration itself: by default quaternion 100 Hz, gyro and acceleration 1000 Hz (profile `fast`, the rates used before f1031cc), which needs the 2 Mbaud link. `PINEAPPLE_IMU_PROFILE=baseline` selects 100/100/100 Hz. With gyro at 100 Hz the policy's angular velocity is up to 10 ms old and, at that low byte rate, the FTDI latency timer (16 ms default) holds samples back by 30–50 ms; policies became shaky after f1031cc made 100 Hz the rate. If the link is slower than 2 Mbaud and no profile is set, the bridge falls back to `baseline` with a warning.
 - Damiao motors: check that every motor replies within 2 ms with `motor_probe` (see [Motor response check](#motor-response-check)).
 
 ## Build
@@ -141,7 +141,7 @@ every gap between samples to be under the profile limit (20 ms for 100 Hz), and 
 invalid quaternions. The measured line is printed as:
 
 ```
-[imu] q/gyro/accel_hz=100/100/100 host_age_ms=... max_field_gap_ms=... ...
+[imu] q/gyro/accel_hz=100/1000/1000 host_age_ms=... max_field_gap_ms=... ...
 ```
 
 If the IMU is missing, cannot be configured, or fails the check, the interface
