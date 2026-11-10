@@ -1,161 +1,152 @@
-#include <xscontroller/xscontrol_def.h>
-#include <xscontroller/xsdevice_def.h>
-#include <xscontroller/xsscanner.h>
-#include <xstypes/xsoutputconfigurationarray.h>
+#pragma once
+
+#include <xscontroller/xscallback.h>
 #include <xstypes/xsdatapacket.h>
-#include <xstypes/xstime.h>
-#include <xscommon/xsens_mutex.h>
-#include <iostream>
-#include <iomanip>
-#include <list>
-#include <string>
-#include <atomic>
-#include <chrono>
-#include <thread>
+#include <xstypes/xsquaternion.h>
+#include <algorithm>
 #include <array>
-#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <iostream>
+#include <memory>
 #include <mutex>
 
-struct ImuSharedData {
+inline double imuMonotonicSeconds()
+{
+    return std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+struct ImuSample {
     std::array<double, 4> quaternion = {1, 0, 0, 0};
     std::array<double, 3> rpy = {0, 0, 0};
     std::array<double, 3> gyro = {0, 0, 0};
     std::array<double, 3> accel = {0, 0, 0};
-    // std::mutex mtx;
-    // Latency instrumentation: host steady_clock (CLOCK_MONOTONIC) ns at which the SDK
-    // delivered the packet carrying the current quaternion / gyro, and the device's own
-    // SampleTimeFine (10 kHz ticks) and packet counter for the current quaternion.
-    std::atomic<int64_t> quat_rx_ns{0};
-    std::atomic<int64_t> gyro_rx_ns{0};
-    std::atomic<uint32_t> quat_sample_time_fine{0};
-    std::atomic<uint32_t> quat_packet_counter{0};
+    std::array<double, 3> received_at = {0, 0, 0};
+    std::array<uint64_t, 3> updates = {0, 0, 0};
+    uint64_t packets = 0, missing_packets = 0, invalid_quaternions = 0;
+    std::array<double, 3> max_field_gap_ms = {0, 0, 0};
+    double max_callback_gap_ms = 0;
+    double device_interval_ms = 0;
+    // Latency instrumentation: device SampleTimeFine (10 kHz) of the current quaternion.
+    uint32_t quat_sample_time_fine = 0;
 };
 
-// Journaller* gJournal = 0;
-
-class CallbackHandler : public XsCallback
-{
+class ImuSharedData {
 public:
-    CallbackHandler(size_t maxBufferSize = 5)
-        : m_maxNumberOfPacketsInBuffer(maxBufferSize)
-        , m_numberOfPacketsInBuffer(0)
-    {}
-
-    bool packetAvailable() const
+    ImuSample load() const
     {
-        xsens::Lock locky(&m_mutex);
-        return m_numberOfPacketsInBuffer > 0;
+        std::lock_guard<std::mutex> lock(mutex_);
+        return sample_;
     }
 
-    // arrival_ns (optional): host steady_clock ns at which the SDK delivered this packet.
-    XsDataPacket getNextPacket(int64_t* arrival_ns = nullptr)
+    void resetTimingStats()
     {
-        xsens::Lock locky(&m_mutex);
-        XsDataPacket oldestPacket(m_packetBuffer.front());
-        m_packetBuffer.pop_front();
-        if (arrival_ns) *arrival_ns = m_arrivalNs.front();
-        m_arrivalNs.pop_front();
-        --m_numberOfPacketsInBuffer;
-        return oldestPacket;
+        std::lock_guard<std::mutex> lock(mutex_);
+        sample_.max_callback_gap_ms = 0;
+        sample_.max_field_gap_ms = {0, 0, 0};
+        last_callback_ = imuMonotonicSeconds();
     }
 
+    void ingest(const XsDataPacket& packet, double now)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (sample_.packets)
+            sample_.max_callback_gap_ms = std::max(
+                sample_.max_callback_gap_ms, (now - last_callback_) * 1000);
+        last_callback_ = now;
+        ++sample_.packets;
+        if (packet.containsPacketCounter()) {
+            const auto counter = packet.packetCounter();
+            const uint16_t delta = static_cast<uint16_t>(counter - previous_counter_);
+            if (have_counter_ && delta > 1 && delta < 32768)
+                sample_.missing_packets += delta - 1;
+            previous_counter_ = counter;
+            have_counter_ = true;
+        }
+        if (packet.containsSampleTimeFine()) {
+            const auto ticks = packet.sampleTimeFine();
+            const uint32_t delta = ticks - previous_ticks_;
+            if (have_ticks_ && delta < 100000)
+                sample_.device_interval_ms = delta * 0.1;
+            previous_ticks_ = ticks;
+            have_ticks_ = true;
+        }
+        if (packet.containsOrientation()) {
+            const auto q = packet.orientationQuaternion();
+            std::array<double, 4> value = {q.w(), q.x(), q.y(), q.z()};
+            double norm = 0;
+            for (double v : value) norm += v * v;
+            if (std::isfinite(norm) && norm > 0.5 && norm < 1.5) {
+                for (size_t i = 0; i < 4; ++i)
+                    sample_.quaternion[i] = value[i] / std::sqrt(norm);
+                const auto e = packet.orientationEuler();
+                sample_.rpy = {e.roll(), e.pitch(), e.yaw()};
+                if (packet.containsSampleTimeFine())
+                    sample_.quat_sample_time_fine = packet.sampleTimeFine();
+                markFieldReceived(0, now);
+            } else {
+                ++sample_.invalid_quaternions;
+            }
+        }
+        if (packet.containsRateOfTurnHR()) {
+            const auto g = packet.rateOfTurnHR();
+            for (size_t i = 0; i < 3; ++i) sample_.gyro[i] = g[i];
+            markFieldReceived(1, now);
+        }
+        if (packet.containsAccelerationHR()) {
+            const auto a = packet.accelerationHR();
+            for (size_t i = 0; i < 3; ++i) sample_.accel[i] = a[i];
+            markFieldReceived(2, now);
+        }
+    }
+
+private:
+    void markFieldReceived(size_t field, double now)
+    {
+        if (sample_.received_at[field] > 0)
+            sample_.max_field_gap_ms[field] = std::max(sample_.max_field_gap_ms[field],
+                1000 * (now - sample_.received_at[field]));
+        sample_.received_at[field] = now;
+        ++sample_.updates[field];
+    }
+
+    mutable std::mutex mutex_;
+    ImuSample sample_;
+    double last_callback_ = 0;
+    uint16_t previous_counter_ = 0;
+    uint32_t previous_ticks_ = 0;
+    bool have_counter_ = false, have_ticks_ = false;
+};
+
+class CallbackHandler : public XsCallback {
+public:
+    void setTarget(std::shared_ptr<ImuSharedData> target) { target_ = std::move(target); }
 protected:
     void onLiveDataAvailable(XsDevice*, const XsDataPacket* packet) override
     {
-        const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        xsens::Lock locky(&m_mutex);
-        if (!packet) return;
-        while (m_numberOfPacketsInBuffer >= m_maxNumberOfPacketsInBuffer)
-            (void)getNextPacket();
-        m_packetBuffer.push_back(*packet);
-        m_arrivalNs.push_back(now_ns);
-        ++m_numberOfPacketsInBuffer;
+        if (packet && target_) target_->ingest(*packet, imuMonotonicSeconds());
     }
 private:
-    mutable xsens::Mutex m_mutex;
-    size_t m_maxNumberOfPacketsInBuffer;
-    size_t m_numberOfPacketsInBuffer;
-    std::list<XsDataPacket> m_packetBuffer;
-    std::list<int64_t> m_arrivalNs;  // parallel to m_packetBuffer
+    std::shared_ptr<ImuSharedData> target_;
 };
 
-// void imuThreadFunc(std::atomic<bool>& running, ImuSharedData* imuData)
-// {
-//     XsControl* control = XsControl::construct();
-//     XsPortInfoArray portInfoArray = XsScanner::scanPorts();
-//     XsPortInfo mtPort;
-//     for (auto const &portInfo : portInfoArray)
-//     {
-//         if (portInfo.deviceId().isMti() || portInfo.deviceId().isMtig())
-//         {
-//             mtPort = portInfo;
-//             break;
-//         }
-//     }
-//     if (mtPort.empty()) {
-//         std::cerr << "No MTi device found. IMU thread exiting." << std::endl;
-//         return;
-//     }
-//     if (!control->openPort(mtPort.portName().toStdString(), mtPort.baudrate())) {
-//         std::cerr << "Could not open IMU port. IMU thread exiting." << std::endl;
-//         return;
-//     }
-//     XsDevice* device = control->device(mtPort.deviceId());
-//     CallbackHandler callback;
-//     device->addCallbackHandler(&callback);
-//     if (!device->gotoConfig()) return;
-//     device->readEmtsAndDeviceConfiguration();
-//     XsOutputConfigurationArray configArray;
-//     configArray.push_back(XsOutputConfiguration(XDI_PacketCounter, 0));
-// 	configArray.push_back(XsOutputConfiguration(XDI_SampleTimeFine, 0));
-//     if (device->deviceId().isVru() || device->deviceId().isAhrs())
-// 	{
-// 		configArray.push_back(XsOutputConfiguration(XDI_Quaternion, 100));
-//         configArray.push_back(XsOutputConfiguration(XDI_RateOfTurnHR, 1000));
-//         configArray.push_back(XsOutputConfiguration(XDI_AccelerationHR, 1000));
-// 	}
-//     if (!device->setOutputConfiguration(configArray)) return;
-//     if (!device->gotoMeasurement()) return;
-
-//     // Add frequency measurement variables
-//     auto lastTime = std::chrono::steady_clock::now();
-//     auto lastPrintTime = std::chrono::steady_clock::now();
-//     int packetCount = 0;
-//     int totalPackets = 0;
-
-//     while (running) {
-//         if (callback.packetAvailable()) {         
-//             XsDataPacket packet = callback.getNextPacket();
-            
-//             std::lock_guard<std::mutex> lock(imuData->mtx);
-//             if (packet.containsOrientation()) {
-//                 XsQuaternion q = packet.orientationQuaternion();
-//                 imuData->quaternion[0] = q.w();
-//                 imuData->quaternion[1] = q.x();
-//                 imuData->quaternion[2] = q.y();
-//                 imuData->quaternion[3] = q.z();
-//                 XsEuler euler = packet.orientationEuler();
-//                 imuData->rpy[0] = euler.roll();
-//                 imuData->rpy[1] = euler.pitch();
-//                 imuData->rpy[2] = euler.yaw();
-//             }
-//             if (packet.containsRateOfTurnHR()) {
-//                 XsVector gyr_hr = packet.rateOfTurnHR();
-//                 for (int i = 0; i < 3; ++i) {
-//                     imuData->gyro[i] = gyr_hr[i];
-//                 }
-//             }
-//             if (packet.containsAccelerationHR()) {
-//                 XsVector acc_hr = packet.accelerationHR();
-//                 for (int i = 0; i < 3; ++i) {
-//                     imuData->accel[i] = acc_hr[i];
-//                 }
-//             }
-//         }
-//     }
-//     control->closePort(mtPort.portName().toStdString());
-//     control->destruct();
-// }
+inline void reportImu(const ImuSample& before, const ImuSample& after,
+                      double elapsed, double now)
+{
+    std::cout << "[imu] q/gyro/accel_hz=";
+    for (size_t i = 0; i < 3; ++i)
+        std::cout << (after.updates[i] - before.updates[i]) / elapsed << (i == 2 ? "" : "/");
+    std::cout << " host_age_ms=";
+    for (size_t i = 0; i < 3; ++i)
+        std::cout << (after.received_at[i] ? 1000 * (now - after.received_at[i]) : -1)
+                  << (i == 2 ? "" : "/");
+    std::cout << " max_field_gap_ms=";
+    for (size_t i = 0; i < 3; ++i)
+        std::cout << after.max_field_gap_ms[i] << (i == 2 ? "" : "/");
+    std::cout << " max_callback_gap_ms=" << after.max_callback_gap_ms
+              << " last_device_interval_ms=" << after.device_interval_ms
+              << " missing_packets=" << after.missing_packets
+              << " invalid_quaternions=" << after.invalid_quaternions << '\n';
+}

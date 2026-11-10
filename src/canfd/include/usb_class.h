@@ -150,6 +150,7 @@ public:
     void get_data_thread();
     void send_thread();
     void can_rev_thread();
+    void receive_fixed(unsigned char endpoint);
 
 private:
 

@@ -11,6 +11,8 @@
 #include <unitree/idl/go2/LowCmd_.hpp>
 #include "../canfd/include/damiao.h"
 #include "../imu/xsens_imu.hpp"
+#include "../imu/configure_xsens.hpp"
+#include "motor_config.hpp"
 
 using namespace unitree::common;
 using namespace unitree::robot;
@@ -21,29 +23,13 @@ using namespace std;
 #define MOTOR_SENSOR_NUM 3
 #define NUM_MOTOR_IDL_GO 20
 
-struct MotorPosLimit {
-    double lower;
-    double upper;
-};
-
-// One platform = one USB2CANFD device (e.g. the wheel biped or the arm).
-struct MotorConfig {
-    string dev_sn;  // USB2CANFD serial number, from scan_canfd_sn
-    bool set_zero = false;
-    vector<uint16_t> can_id_list;
-    vector<uint16_t> mst_id_list;
-    vector<int> motor_type;
-    vector<double> motor_offset;
-    vector<double> direction;
-    vector<MotorPosLimit> pos_limit;
-};
-
 class PineappleSdk2Bridge
 {
 public:
     // Platforms are concatenated: the joint index in LowCmd/LowState follows
     // the order of platform_configs (platform 0 motors first, then platform 1, ...).
-    PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs);
+    PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs,
+                        bool skip_imu_timing_check = false);
     ~PineappleSdk2Bridge();
 
     void LowCmdGoHandler(const void *msg);
@@ -54,8 +40,7 @@ public:
     void AddMotorOffset();
 
     // IMU related
-    void InitXsensIMU();
-    void ProcessXsensData();
+    bool InitXsensIMU();
     void CloseXsensIMU();
 
     ChannelSubscriberPtr<unitree_go::msg::dds_::LowCmd_> low_cmd_go_suber_;
@@ -69,7 +54,7 @@ public:
 
     int dim_motor_sensor_ = 0;
 
-    int have_imu_ = true;
+    bool have_imu_ = false;
 
     // Concatenation of all platform configs, indexed by global joint index.
     int num_motor_ = 0;
@@ -81,6 +66,8 @@ public:
     vector<MotorPosLimit> pos_limit_;
 
     private:
+
+    bool skip_imu_timing_check_ = false;
 
     void HandleMotorFault(int motor_idx);
     bool IsMotorConnected(int motor_idx) const;
@@ -106,13 +93,12 @@ public:
     std::chrono::steady_clock::time_point last_poll_time_;
     double poll_interval_sec_ = 0.02;    // actively solicit feedback at 50 Hz
 
-    // IMU related
-    // ---- Latency instrumentation (see docs/latency_timestamps.md) ----
+    // ---- Latency instrumentation (pineapple_rl_deploy docs/latency_timestamps.md) ----
     // Every stamp is CLOCK_MONOTONIC microseconds mod 2^32 ("mono32"), the clock Python's
     // time.monotonic_ns() reads, so bridge, deploy and recorder times compare directly.
-    // Carried in LowState_ fields this bridge does not otherwise use: `tick`, each motor's
-    // `reserve[2]` / `lost`, and spare motor slots LAT_SLOT_A/B (only when num_motor_ leaves
-    // them free).
+    // Carried in LowState_ fields this bridge does not otherwise use: `tick`, `reserve`,
+    // each motor's `reserve[2]` / `lost`, and spare motor slots LAT_SLOT_A/B (only when
+    // num_motor_ leaves them free).
     static constexpr int LAT_SLOT_A = 19;  // IMU stamps
     static constexpr int LAT_SLOT_B = 18;  // lowcmd-handler stamps + deploy echoes
     static uint32_t Mono32(std::chrono::steady_clock::time_point tp)
@@ -120,15 +106,16 @@ public:
         return static_cast<uint32_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(tp.time_since_epoch()).count());
     }
-    static uint32_t Mono32Ns(int64_t ns) { return static_cast<uint32_t>(ns / 1000); }
+    static uint32_t Mono32Seconds(double s) { return s > 0 ? static_cast<uint32_t>(static_cast<int64_t>(s * 1e6)) : 0; }
     std::atomic<uint32_t> lat_cmd_entry_{0};       // LowCmdGoHandler entered
     std::atomic<uint32_t> lat_cmd_exit_{0};        // all MIT frames handed to USB
     std::atomic<uint32_t> lat_cmd_seq_{0};         // echo of LowCmd_.reserve (deploy sequence)
     std::atomic<uint32_t> lat_cmd_state_tick_{0};  // echo of the LowState tick the policy used
     std::atomic<uint32_t> lat_cmd_count_{0};       // lowcmd messages handled
 
-    std::thread xsens_imu_thread;
+    // IMU related
     std::shared_ptr<ImuSharedData> xsens_imu_data;
+
     XsControl* xsens_control = nullptr;
     XsPortInfo xsens_mtPort;
     CallbackHandler xsens_callback;

@@ -1,7 +1,28 @@
 #include "pineapple_sdk2_bridge.h"
 
-PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs)
+#include <algorithm>
+#include <stdexcept>
+
+PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_configs,
+                                         bool skip_imu_timing_check)
+    : skip_imu_timing_check_(skip_imu_timing_check)
 {
+    xsens_imu_data = std::make_shared<ImuSharedData>();
+
+    // The MTi is a robot-level device, not a per-platform one: any config that
+    // declares it turns it on, so argument order cannot change whether
+    // orientation gets published.
+    have_imu_ = std::any_of(platform_configs.begin(), platform_configs.end(),
+                            [](const MotorConfig &cfg) { return cfg.have_imu; });
+    if (have_imu_ && !InitXsensIMU()) {
+        CloseXsensIMU();
+        throw std::runtime_error("IMU startup check failed; motors were not enabled");
+    }
+    if (!have_imu_) {
+        // Publish a valid identity rather than the IDL's default {0,0,0,0},
+        // which NaNs any consumer that normalizes the quaternion.
+        low_state_go_.imu_state().quaternion()[0] = 1.0f;
+    }
 
     dm_data_lists_.reserve(platform_configs.size());
 
@@ -38,7 +59,6 @@ PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_con
     }
     num_motor_ = can_id_list.size();
 
-    xsens_imu_data = std::make_shared<ImuSharedData>();
     last_fault_recovery_time_.resize(num_motor_, std::chrono::steady_clock::now());
     last_disconnect_log_time_.resize(num_motor_, std::chrono::steady_clock::now());
 
@@ -47,11 +67,6 @@ PineappleSdk2Bridge::PineappleSdk2Bridge(const vector<MotorConfig> &platform_con
 
     low_state_go_puber_.reset(new ChannelPublisher<unitree_go::msg::dds_::LowState_>(TOPIC_LOWSTATE));
     low_state_go_puber_->InitChannel();
-    
-    if (have_imu_) {
-        InitXsensIMU();
-        xsens_imu_thread = std::thread(&PineappleSdk2Bridge::ProcessXsensData, this);
-    }
 
     init_time_ = std::chrono::steady_clock::now();
     last_poll_time_ = init_time_;
@@ -73,10 +88,7 @@ PineappleSdk2Bridge::~PineappleSdk2Bridge()
         lowStatePuberThreadPtr.reset();
     }
 
-    if (have_imu_) {
-        xsens_imu_thread.join();
-        CloseXsensIMU();
-    }
+    CloseXsensIMU();
 
 }
 
@@ -153,26 +165,22 @@ void PineappleSdk2Bridge::PublishLowStateGo()
     for (uint16_t i = 0;i < num_motor_; i++)
     {
         auto motor = CtrlOf(i)->getMotor(can_id_list[i]);
-        int motor_type = motor->GetMotorMode();
-        double pos = motor->Get_Position();
-        double vel = motor->Get_Velocity();
-        double tau = motor->Get_tau();
-        uint8_t err = motor->Get_ERR();
-
-        if (motor_type == damiao::DM4340)
-        {
-            pos = pos / (12.5 / M_PI);
-        }
+        const auto feedback = motor->GetFeedback();
+        double pos = feedback.q;
+        double vel = feedback.dq;
+        double tau = feedback.tau;
+        uint8_t err = feedback.error;
 
         low_state_go_.motor_state()[i].q() = (pos - motor_offset[i]) * direction[i];
         low_state_go_.motor_state()[i].dq() = vel * direction[i];
         low_state_go_.motor_state()[i].tau_est() = tau * direction[i];
         low_state_go_.motor_state()[i].mode() = err;
-        low_state_go_.motor_state()[i].temperature() = static_cast<uint8_t>(motor->Get_T_MOS());
-        // Latency instrumentation: when this motor's state was received / last commanded.
+        low_state_go_.motor_state()[i].temperature() = static_cast<uint8_t>(feedback.t_mos);
+        // Latency instrumentation: when this motor's state was received / last commanded,
+        // and its feedback sequence (changes => fresh reply).
         low_state_go_.motor_state()[i].reserve()[0] = Mono32(motor->GetLastFeedbackTime());
         low_state_go_.motor_state()[i].reserve()[1] = Mono32(motor->GetLastCommandTime());
-        low_state_go_.motor_state()[i].lost() = motor->GetFeedbackCount();
+        low_state_go_.motor_state()[i].lost() = static_cast<uint32_t>(feedback.sequence);
 
         if (!IsMotorConnected(i)) {
             auto now = std::chrono::steady_clock::now();
@@ -192,26 +200,29 @@ void PineappleSdk2Bridge::PublishLowStateGo()
     
     if (have_imu_)
     {
-        low_state_go_.imu_state().quaternion()[0] = xsens_imu_data->quaternion[0];
-        low_state_go_.imu_state().quaternion()[1] = xsens_imu_data->quaternion[1];
-        low_state_go_.imu_state().quaternion()[2] = xsens_imu_data->quaternion[2];
-        low_state_go_.imu_state().quaternion()[3] = xsens_imu_data->quaternion[3];
+        // One snapshot, so quaternion components can never be mixed across
+        // two different device samples.
+        const ImuSample imu = xsens_imu_data->load();
 
-        low_state_go_.imu_state().gyroscope()[0] = xsens_imu_data->gyro[0];
-        low_state_go_.imu_state().gyroscope()[1] = xsens_imu_data->gyro[1];
-        low_state_go_.imu_state().gyroscope()[2] = xsens_imu_data->gyro[2];
-
-        low_state_go_.imu_state().accelerometer()[0] = xsens_imu_data->accel[0];
-        low_state_go_.imu_state().accelerometer()[1] = xsens_imu_data->accel[1];
-        low_state_go_.imu_state().accelerometer()[2] = xsens_imu_data->accel[2];
+        for (int i = 0; i < 4; i++) {
+            low_state_go_.imu_state().quaternion()[i] = imu.quaternion[i];
+        }
+        for (int i = 0; i < 3; i++) {
+            low_state_go_.imu_state().gyroscope()[i] = imu.gyro[i];
+            low_state_go_.imu_state().accelerometer()[i] = imu.accel[i];
+        }
+        // Latency instrumentation: host arrival of the current quaternion / gyro, and the
+        // quaternion's device SampleTimeFine. Spare slot only.
+        if (num_motor_ <= LAT_SLOT_B)
+        {
+            auto &a = low_state_go_.motor_state()[LAT_SLOT_A];
+            a.reserve()[0] = Mono32Seconds(imu.received_at[0]);
+            a.reserve()[1] = Mono32Seconds(imu.received_at[1]);
+            a.lost() = imu.quat_sample_time_fine;
+        }
     }
-    // Latency instrumentation (docs/latency_timestamps.md). Spare slots only.
     if (num_motor_ <= LAT_SLOT_B)
     {
-        auto &a = low_state_go_.motor_state()[LAT_SLOT_A];
-        a.reserve()[0] = Mono32Ns(xsens_imu_data->quat_rx_ns.load());
-        a.reserve()[1] = Mono32Ns(xsens_imu_data->gyro_rx_ns.load());
-        a.lost() = xsens_imu_data->quat_sample_time_fine.load();
         auto &b = low_state_go_.motor_state()[LAT_SLOT_B];
         b.reserve()[0] = lat_cmd_entry_.load();
         b.reserve()[1] = lat_cmd_exit_.load();
@@ -224,8 +235,15 @@ void PineappleSdk2Bridge::PublishLowStateGo()
 
 }
 
-void PineappleSdk2Bridge::InitXsensIMU()
+bool PineappleSdk2Bridge::InitXsensIMU()
 {
+    ImuOutputProfile profile;
+    try {
+        profile = imuOutputProfileFromEnvironment();
+    } catch (const std::exception &e) {
+        std::cerr << e.what() << std::endl;
+        return false;
+    }
     xsens_control = XsControl::construct();
     XsPortInfoArray xsens_portInfoArray = XsScanner::scanPorts();
     for (auto const &portInfo : xsens_portInfoArray)
@@ -237,76 +255,36 @@ void PineappleSdk2Bridge::InitXsensIMU()
         }
     }
     if (xsens_mtPort.empty()) {
-        std::cerr << "No MTi device found. IMU thread exiting." << std::endl;
-        return;
+        std::cerr << "No MTi device found." << std::endl;
+        return false;
     }
     if (!xsens_control->openPort(xsens_mtPort.portName().toStdString(), xsens_mtPort.baudrate())) {
-        std::cerr << "Could not open IMU port. IMU thread exiting." << std::endl;
-        return;
+        std::cerr << "Could not open IMU port." << std::endl;
+        return false;
     }
     // Get the device object
-    cout << "Found a device with ID: " << xsens_mtPort.deviceId().toString().toStdString() << " @ port: " << xsens_mtPort.portName().toStdString() << ", baudrate: " << xsens_mtPort.baudrate() << endl;
+    cout << "Found a device with ID: " << xsens_mtPort.deviceId().toString().toStdString() << " @ port: " << xsens_mtPort.portName().toStdString() << ", baudrate: " << XsBaud::rateToNumeric(xsens_mtPort.baudrate()) << endl;
 	xsens_device = xsens_control->device(xsens_mtPort.deviceId());
 	assert(xsens_device != 0);
 
 	cout << "Device: " << xsens_device->productCode().toStdString() << ", with ID: " << xsens_device->deviceId().toString() << " opened." << endl;
 
+    xsens_callback.setTarget(xsens_imu_data);
     xsens_device->addCallbackHandler(&xsens_callback);
-    if (!xsens_device->gotoConfig()) return;
-    xsens_device->readEmtsAndDeviceConfiguration();
-    XsOutputConfigurationArray configArray;
-    configArray.push_back(XsOutputConfiguration(XDI_PacketCounter, 0));
-	configArray.push_back(XsOutputConfiguration(XDI_SampleTimeFine, 0));
-    if (xsens_device->deviceId().isVru() || xsens_device->deviceId().isAhrs())
-	{
-		configArray.push_back(XsOutputConfiguration(XDI_Quaternion, 100));
-        configArray.push_back(XsOutputConfiguration(XDI_RateOfTurnHR, 1000));
-        configArray.push_back(XsOutputConfiguration(XDI_AccelerationHR, 1000));
-	}
-    if (!xsens_device->setOutputConfiguration(configArray)) return;
-    if (!xsens_device->gotoMeasurement()) return;
-}
-
-void PineappleSdk2Bridge::ProcessXsensData()
-{
-    
-    while (is_running) {
-        if (xsens_callback.packetAvailable()) {
-            int64_t arrival_ns = 0;
-            XsDataPacket packet = xsens_callback.getNextPacket(&arrival_ns);
-
-            if (packet.containsOrientation()) {
-                xsens_imu_data->quat_rx_ns = arrival_ns;
-                if (packet.containsSampleTimeFine())
-                    xsens_imu_data->quat_sample_time_fine = packet.sampleTimeFine();
-                if (packet.containsPacketCounter())
-                    xsens_imu_data->quat_packet_counter = packet.packetCounter();
-                XsQuaternion q = packet.orientationQuaternion();
-                xsens_imu_data->quaternion[0] = q.w();
-                xsens_imu_data->quaternion[1] = q.x();
-                xsens_imu_data->quaternion[2] = q.y();
-                xsens_imu_data->quaternion[3] = q.z();
-                XsEuler euler = packet.orientationEuler();
-                xsens_imu_data->rpy[0] = euler.roll();
-                xsens_imu_data->rpy[1] = euler.pitch();
-                xsens_imu_data->rpy[2] = euler.yaw();
-            }
-            if (packet.containsRateOfTurnHR()) {
-                xsens_imu_data->gyro_rx_ns = arrival_ns;
-                XsVector gyr_hr = packet.rateOfTurnHR();
-                for (int i = 0; i < 3; ++i) {
-                    xsens_imu_data->gyro[i] = gyr_hr[i];
-                }
-            }
-            if (packet.containsAccelerationHR()) {
-                XsVector acc_hr = packet.accelerationHR();
-                for (int i = 0; i < 3; ++i) {
-                    xsens_imu_data->accel[i] = acc_hr[i];
-                }
-            }
-        }
-        XsTime::msleep(1);
+    if (!configureXsens(*xsens_device, profile, xsens_mtPort.baudrate())) {
+        std::cerr << "IMU configuration/readback failed." << std::endl;
+        return false;
     }
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    if (skip_imu_timing_check_) {
+        std::cerr << "[imu] Startup timing check disabled for this run; "
+                     "valid quaternion and incoming fields are still required.\n";
+    }
+    if (!verifyImuDelivery(*xsens_imu_data, profile, 1.0, skip_imu_timing_check_)) {
+        std::cerr << "IMU delivery check failed." << std::endl;
+        return false;
+    }
+    return true;
 }
 
 bool PineappleSdk2Bridge::IsMotorConnected(int motor_idx) const
